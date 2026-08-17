@@ -23,3 +23,4 @@ env/
 
 # Generated ingestion data
 data/raw/*.jsonl
+data/processed/*.jsonl

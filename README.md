@@ -1,8 +1,9 @@
 # AI Incident Resolution Platform
 
 Initial FastAPI service for an AI-assisted incident-resolution platform. It
-provides a health endpoint, GitHub issue ingestion, and a local Neo4j graph
-loader. It does not yet include an LLM, frontend, or Kubernetes configuration.
+provides a health endpoint, GitHub issue ingestion, FH Genie issue enrichment,
+and a local Neo4j graph loader. It does not yet include a frontend or
+Kubernetes deployment configuration.
 
 ## Prerequisites
 
@@ -35,6 +36,8 @@ cp .env.example .env
 authenticated GitHub API rate limits. Never commit the `.env` file.
 
 Set `NEO4J_USERNAME` and `NEO4J_PASSWORD` in `.env` before starting Neo4j.
+For issue enrichment, set `FH_GENIE_KEY`, `FH_GENIE_BASE_URL`, and
+`FH_GENIE_MODEL`. The key is loaded as a secret and must never be committed.
 
 Run the API locally:
 
@@ -66,6 +69,30 @@ The command creates missing output directories, follows API pagination, and
 excludes pull requests returned by GitHub's Issues API. Each line contains
 only the issue number, title, body, labels, state, timestamps, comment count,
 and HTML URL. Generated files under `data/raw/` are ignored by Git.
+
+## FH Genie issue enrichment
+
+Enrich an ingested JSONL file using the configured FH Genie
+OpenAI-compatible endpoint:
+
+```bash
+python -m app.enrichment.cli \
+  --input data/raw/kubernetes_issues.jsonl \
+  --output data/processed/kubernetes_issues_enriched.jsonl \
+  --limit 10
+```
+
+For each issue, the command sends only its title and body to the configured
+model. It writes a separate JSONL file and preserves every source field. The
+validated `enrichment` object contains `summary`, `symptom`,
+`expected_behavior`, `components`, `error_messages`, and
+`kubernetes_versions`. Missing scalar values are `null`; missing collections
+are empty lists.
+
+Invalid model output is retried once. If an issue still fails, its original
+record is written with `enrichment: null`, its issue number is logged, and the
+remaining issues continue. Issue bodies and sensitive configuration are not
+logged. Generated files under `data/processed/` are ignored by Git.
 
 ## Neo4j graph
 
@@ -101,6 +128,7 @@ docker compose down
 .
 ├── src/app/          # FastAPI application package
 │   ├── graph/        # Neo4j graph loader and CLI
+│   ├── enrichment/   # FH Genie client, models, and JSONL CLI
 │   └── ingestion/    # GitHub issue ingestion client and CLI
 ├── tests/            # Automated tests
 ├── .env.example      # Local configuration template
