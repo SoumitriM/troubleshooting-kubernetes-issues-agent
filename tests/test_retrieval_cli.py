@@ -9,9 +9,12 @@ from pydantic import SecretStr
 from app.retrieval import cli
 
 
-def configure_cli(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
+def configure_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[MagicMock, MagicMock, MagicMock]:
     driver = MagicMock()
     store = MagicMock()
+    graph_retriever = MagicMock()
     monkeypatch.setattr(
         cli,
         "GraphSettings",
@@ -24,14 +27,15 @@ def configure_cli(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock
     monkeypatch.setattr(cli.GraphDatabase, "driver", lambda *_args, **_kwargs: driver)
     monkeypatch.setattr(cli, "IssueEmbedder", MagicMock)
     monkeypatch.setattr(cli, "IssueVectorStore", lambda *_args: store)
-    return driver, store
+    monkeypatch.setattr(cli, "GraphRetriever", lambda *_args: graph_retriever)
+    return driver, store, graph_retriever
 
 
 def test_index_cli_indexes_without_real_model_or_database(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    driver, store = configure_cli(monkeypatch)
+    driver, store, _graph_retriever = configure_cli(monkeypatch)
     store.index_issues.return_value = 3
     monkeypatch.setattr(sys, "argv", ["app.retrieval.cli", "index"])
 
@@ -45,7 +49,7 @@ def test_search_cli_prints_json_results(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    driver, store = configure_cli(monkeypatch)
+    driver, store, _graph_retriever = configure_cli(monkeypatch)
     store.search.return_value = [{"issue_number": 42, "score": 0.9}]
     monkeypatch.setattr(
         sys,
@@ -57,4 +61,35 @@ def test_search_cli_prints_json_results(
 
     assert json.loads(capsys.readouterr().out) == {"issue_number": 42, "score": 0.9}
     store.search.assert_called_once_with("collector", 2)
+    driver.close.assert_called_once_with()
+
+
+def test_graph_search_cli_prints_one_context_object(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    driver, _store, graph_retriever = configure_cli(monkeypatch)
+    graph_retriever.retrieve.return_value = {
+        "query": "valid owners",
+        "matched_issues": [{"issue_number": 42, "score": 0.9}],
+        "related_issues": [],
+    }
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "app.retrieval.cli",
+            "graph-search",
+            "--query",
+            "valid owners",
+            "--limit",
+            "5",
+        ],
+    )
+
+    cli.main()
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["matched_issues"][0]["score"] == 0.9
+    graph_retriever.retrieve.assert_called_once_with("valid owners", 5)
     driver.close.assert_called_once_with()

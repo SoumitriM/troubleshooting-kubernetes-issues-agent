@@ -5,6 +5,7 @@ from neo4j import GraphDatabase
 
 from app.graph.loader import GraphSettings
 from app.retrieval.embeddings import IssueEmbedder
+from app.retrieval.graph_retriever import GraphRetriever
 from app.retrieval.vector_store import IssueVectorStore
 
 
@@ -22,6 +23,12 @@ def build_parser() -> argparse.ArgumentParser:
     search = commands.add_parser("search", help="Search indexed Issue nodes")
     search.add_argument("--query", required=True)
     search.add_argument("--limit", type=positive_integer, default=5)
+    graph_search = commands.add_parser(
+        "graph-search",
+        help="Search Issue nodes and expand through graph relationships",
+    )
+    graph_search.add_argument("--query", required=True)
+    graph_search.add_argument("--limit", type=positive_integer, default=5)
     return parser
 
 
@@ -36,13 +43,18 @@ def main() -> None:
         ),
     )
     try:
-        store = IssueVectorStore(driver, IssueEmbedder())
+        embedder = IssueEmbedder()
         if args.command == "index":
+            store = IssueVectorStore(driver, embedder)
             count = store.index_issues()
             print(f"Indexed {count} changed issues")
-        else:
+        elif args.command == "search":
+            store = IssueVectorStore(driver, embedder)
             for result in store.search(args.query, args.limit):
                 print(json.dumps(result, ensure_ascii=False))
+        else:
+            context = GraphRetriever(driver, embedder).retrieve(args.query, args.limit)
+            print(json.dumps(context, ensure_ascii=False))
     finally:
         driver.close()
 

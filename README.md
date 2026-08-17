@@ -169,6 +169,20 @@ Each JSON result contains the issue number, title, summary, URL, and cosine
 similarity score. The embedding model runs locally; its first use may download
 the model files.
 
+For a GraphRAG-style context object, expand the five closest vector matches
+through their components, Kubernetes versions, labels, and error messages:
+
+```bash
+python -m app.retrieval.cli graph-search \
+  --query "Kubernetes keeps processing objects even though valid owners exist" \
+  --limit 5
+```
+
+The result is one JSON object containing the query, deduplicated vector-matched
+issues with similarity scores and graph metadata, and up to three additional
+issues sharing a component or Kubernetes version. This retrieval step is
+bounded and does not call FH Genie or another language model.
+
 ## Project structure
 
 ```text
