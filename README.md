@@ -2,8 +2,8 @@
 
 Initial FastAPI service for an AI-assisted incident-resolution platform. It
 provides a health endpoint, GitHub issue ingestion, FH Genie issue enrichment,
-and a local Neo4j graph loader. It does not yet include a frontend or
-Kubernetes deployment configuration.
+a local Neo4j graph loader, and semantic issue search. It does not yet include
+a frontend or Kubernetes deployment configuration.
 
 ## Prerequisites
 
@@ -142,6 +142,33 @@ Stop the service without deleting its data:
 docker compose down
 ```
 
+## Semantic issue search
+
+After loading issues into Neo4j, generate local embeddings and create the
+Neo4j vector index:
+
+```bash
+python -m app.retrieval.cli index
+```
+
+The command uses `sentence-transformers/all-MiniLM-L6-v2`, which produces
+384-dimensional normalized embeddings. Searchable text is built from each
+Issue's title, summary, symptom, and expected behavior. A content hash is kept
+on the node, so later indexing runs skip issues whose searchable fields have
+not changed.
+
+Search the indexed issues:
+
+```bash
+python -m app.retrieval.cli search \
+  --query "garbage collector keeps processing objects with valid owners" \
+  --limit 5
+```
+
+Each JSON result contains the issue number, title, summary, URL, and cosine
+similarity score. The embedding model runs locally; its first use may download
+the model files.
+
 ## Project structure
 
 ```text
@@ -149,7 +176,8 @@ docker compose down
 ├── src/app/          # FastAPI application package
 │   ├── graph/        # Neo4j graph loader and CLI
 │   ├── enrichment/   # FH Genie client, models, and JSONL CLI
-│   └── ingestion/    # GitHub issue ingestion client and CLI
+│   ├── ingestion/    # GitHub issue ingestion client and CLI
+│   └── retrieval/    # Local embeddings and Neo4j vector search CLI
 ├── tests/            # Automated tests
 ├── .env.example      # Local configuration template
 ├── docker-compose.yml # Local Neo4j Community Edition service
