@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -41,8 +42,14 @@ def test_enrich_sends_title_and_body_and_validates_response() -> None:
     assert result.components == ["kubelet"]
     request = api.chat.completions.create.call_args.kwargs
     assert request["model"] == "test-model"
-    assert "Pods restart repeatedly" in request["messages"][1]["content"]
-    assert "CrashLoopBackOff on 1.30" in request["messages"][1]["content"]
+    assert request["temperature"] == 1.0
+    assert request["max_completion_tokens"] == 2048
+    assert request["extra_body"] == {"reasoning_split": True}
+    issue_payload = json.loads(request["messages"][1]["content"])
+    assert issue_payload == {
+        "title": "Pods restart repeatedly",
+        "body": "Kubelet reports CrashLoopBackOff on 1.30",
+    }
 
 
 def test_enrich_retries_once_after_invalid_json() -> None:
