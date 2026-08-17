@@ -101,6 +101,29 @@ with `--limit 100` continues from (for example) `Enriching 11/100`. Failed
 records are retried on a later run. To discard the existing output and start
 again explicitly, add `--overwrite`.
 
+## Resolution evidence ingestion
+
+After enrichment, fetch explicit resolution evidence from GitHub:
+
+```bash
+python -m app.ingestion.resolution_cli \
+  --input data/processed/kubernetes_issues_enriched.jsonl \
+  --output data/processed/kubernetes_issues_with_evidence.jsonl \
+  --limit 20
+```
+
+The command preserves every input field and adds `resolution_evidence` with
+normalized comments, cross-referenced pull requests, closing commits, and any
+request-specific errors. Issues reporting zero comments skip only the comments
+endpoint; their timeline is still fetched. GitHub pagination and rate-limit
+retry headers are handled, and the optional `GITHUB_TOKEN` is loaded from the
+existing application settings without being printed.
+
+The output is checkpointed after each issue and is resumable. Existing issue
+numbers with resolution evidence are skipped, legacy duplicates are collapsed,
+and `--limit` specifies the target total number of processed issues. This stage
+does not call an LLM or infer whether an issue was resolved.
+
 ## Neo4j graph
 
 Start Neo4j Community Edition locally:
@@ -190,7 +213,7 @@ bounded and does not call FH Genie or another language model.
 ├── src/app/          # FastAPI application package
 │   ├── graph/        # Neo4j graph loader and CLI
 │   ├── enrichment/   # FH Genie client, models, and JSONL CLI
-│   ├── ingestion/    # GitHub issue ingestion client and CLI
+│   ├── ingestion/    # GitHub issue and resolution-evidence ingestion
 │   └── retrieval/    # Local embeddings and Neo4j vector search CLI
 ├── tests/            # Automated tests
 ├── .env.example      # Local configuration template
