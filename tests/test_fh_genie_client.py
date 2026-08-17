@@ -4,7 +4,11 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import SecretStr
 
-from app.enrichment.fh_genie_client import EnrichmentSettings, FHGenieClient
+from app.enrichment.fh_genie_client import (
+    EnrichmentResponseError,
+    EnrichmentSettings,
+    FHGenieClient,
+)
 
 
 def response(content: str) -> SimpleNamespace:
@@ -61,10 +65,23 @@ def test_enrich_fails_after_two_invalid_responses() -> None:
     api = MagicMock()
     api.chat.completions.create.return_value = response("not json")
 
-    with pytest.raises(ValueError, match="invalid enrichment response"):
+    with pytest.raises(EnrichmentResponseError, match="invalid JSON response"):
         FHGenieClient(settings(), client=api).enrich("Title", "Body")
 
     assert api.chat.completions.create.call_count == 2
+
+
+def test_enrich_reports_schema_failure_without_response_content() -> None:
+    api = MagicMock()
+    sensitive_response = '{"summary": 123, "private": "do-not-log"}'
+    api.chat.completions.create.return_value = response(sensitive_response)
+
+    with pytest.raises(
+        EnrichmentResponseError, match="response schema validation failed"
+    ) as raised:
+        FHGenieClient(settings(), client=api).enrich("Title", "Body")
+
+    assert sensitive_response not in str(raised.value)
 
 
 def test_api_key_is_secret_and_redacted() -> None:

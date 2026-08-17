@@ -1,4 +1,3 @@
-import json
 from typing import Any, Protocol
 
 from openai import OpenAI
@@ -28,6 +27,14 @@ class Chat(Protocol):
 
 class OpenAICompatibleClient(Protocol):
     chat: Chat
+
+
+class EnrichmentResponseError(ValueError):
+    """A model response failed safe validation without retaining its content."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 SYSTEM_PROMPT = """You extract supported facts from Kubernetes GitHub issues.
@@ -60,7 +67,7 @@ class FHGenieClient:
     def enrich(self, title: str, body: str | None) -> IssueEnrichment:
         """Enrich one issue, retrying once after an invalid model response."""
 
-        last_error: ValueError | ValidationError | json.JSONDecodeError | None = None
+        failure_reason = "invalid model response"
         for _attempt in range(2):
             response = self._client.chat.completions.create(
                 model=self._model,
@@ -76,9 +83,15 @@ class FHGenieClient:
             content = response.choices[0].message.content
             try:
                 if not content:
-                    raise ValueError("FH Genie returned empty content")
+                    failure_reason = "empty model response"
+                    continue
                 return IssueEnrichment.model_validate_json(content)
-            except (ValueError, ValidationError, json.JSONDecodeError) as error:
-                last_error = error
+            except ValidationError as error:
+                error_types = {item["type"] for item in error.errors()}
+                failure_reason = (
+                    "invalid JSON response"
+                    if "json_invalid" in error_types
+                    else "response schema validation failed"
+                )
 
-        raise ValueError("FH Genie returned an invalid enrichment response") from last_error
+        raise EnrichmentResponseError(failure_reason)

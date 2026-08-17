@@ -4,7 +4,11 @@ import logging
 from pathlib import Path
 from typing import Any, Iterator
 
-from app.enrichment.fh_genie_client import EnrichmentSettings, FHGenieClient
+from app.enrichment.fh_genie_client import (
+    EnrichmentResponseError,
+    EnrichmentSettings,
+    FHGenieClient,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -66,8 +70,15 @@ def enrich_jsonl(
                     "enrichment": enrichment.model_dump(mode="json"),
                 }
                 succeeded += 1
-            except Exception:
-                logger.error("Failed to enrich issue %s", issue_number)
+            except Exception as error:
+                reason = (
+                    error.reason
+                    if isinstance(error, EnrichmentResponseError)
+                    else f"client error ({type(error).__name__})"
+                )
+                logger.error(
+                    "Failed to enrich issue %s: %s", issue_number, reason
+                )
                 enriched_record = {**issue, "enrichment": None}
                 failed += 1
             output_file.write(json.dumps(enriched_record, ensure_ascii=False) + "\n")
@@ -77,6 +88,7 @@ def enrich_jsonl(
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     args = build_parser().parse_args()
     settings = EnrichmentSettings()
     client = FHGenieClient(settings)

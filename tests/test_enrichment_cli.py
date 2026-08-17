@@ -7,13 +7,14 @@ from types import SimpleNamespace
 import pytest
 
 from app.enrichment import cli
+from app.enrichment.fh_genie_client import EnrichmentResponseError
 from app.enrichment.models import IssueEnrichment
 
 
 class FakeClient:
     def enrich(self, title: str, body: str | None) -> IssueEnrichment:
         if title == "Broken extraction":
-            raise ValueError("body text must not appear in logs")
+            raise EnrichmentResponseError("invalid JSON response")
         return IssueEnrichment(
             summary="Supported summary",
             components=["kubelet"],
@@ -63,7 +64,7 @@ def test_enrich_jsonl_preserves_fields_and_continues_after_failure(
     assert records[0]["enrichment"]["components"] == ["kubelet"]
     assert records[0]["enrichment"]["symptom"] is None
     assert records[1]["enrichment"] is None
-    assert "Failed to enrich issue 2" in caplog.text
+    assert "Failed to enrich issue 2: invalid JSON response" in caplog.text
     assert "sensitive complete issue body" not in caplog.text.lower()
 
 
