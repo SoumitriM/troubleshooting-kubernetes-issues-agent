@@ -112,9 +112,22 @@ After ingesting the JSONL file, load it into the graph:
 python -m app.graph.cli --input data/raw/kubernetes_issues.jsonl
 ```
 
+The same CLI also accepts enriched issue records:
+
+```bash
+python -m app.graph.cli \
+  --input data/processed/kubernetes_issues_enriched.jsonl
+```
+
 The loader derives the repository from each issue URL and uses Cypher `MERGE`
-for `Repository`, `Issue`, and `Label` nodes and their `HAS_ISSUE` and
-`HAS_LABEL` relationships. Re-running it does not duplicate graph entities.
+for all nodes and relationships. Existing `Repository`, `Issue`, and `Label`
+entities are preserved. Enriched records update the issue's `summary`,
+`symptom`, and `expected_behavior`, then create `Component`,
+`KubernetesVersion`, and `ErrorMessage` nodes connected through
+`AFFECTS_COMPONENT`, `REPORTED_IN_VERSION`, and `HAS_ERROR`. Component names
+are trimmed and lowercased for matching. Re-running either raw or enriched
+loads does not duplicate graph entities, and the loader never clears existing
+Neo4j data.
 
 Stop the service without deleting its data:
 
