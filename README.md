@@ -1,8 +1,8 @@
 # AI Incident Resolution Platform
 
-Initial FastAPI service for an AI-assisted incident-resolution platform. This
-first iteration provides only a health endpoint; it does not yet include an
-LLM, database, frontend, or Kubernetes configuration.
+Initial FastAPI service for an AI-assisted incident-resolution platform. It
+provides a health endpoint and a GitHub issue ingestion command. It does not
+yet include an LLM, database, frontend, or Kubernetes configuration.
 
 ## Prerequisites
 
@@ -30,6 +30,9 @@ Optionally create a local environment file:
 cp .env.example .env
 ```
 
+`GITHUB_TOKEN` is optional for public repositories. Set it in `.env` to use
+authenticated GitHub API rate limits. Never commit the `.env` file.
+
 Run the API locally:
 
 ```bash
@@ -44,11 +47,29 @@ Run the tests:
 pytest
 ```
 
+## GitHub issue ingestion
+
+Fetch closed issues from a public repository and write normalized JSONL:
+
+```bash
+python -m app.ingestion.cli \
+  --owner kubernetes \
+  --repo kubernetes \
+  --limit 100 \
+  --output data/raw/kubernetes_issues.jsonl
+```
+
+The command creates missing output directories, follows API pagination, and
+excludes pull requests returned by GitHub's Issues API. Each line contains
+only the issue number, title, body, labels, state, timestamps, comment count,
+and HTML URL. Generated files under `data/raw/` are ignored by Git.
+
 ## Project structure
 
 ```text
 .
 ├── src/app/          # FastAPI application package
+│   └── ingestion/    # GitHub issue ingestion client and CLI
 ├── tests/            # Automated tests
 ├── .env.example      # Local configuration template
 └── pyproject.toml    # Project metadata and dependencies

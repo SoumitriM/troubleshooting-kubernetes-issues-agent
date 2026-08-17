@@ -20,3 +20,6 @@ env/
 
 # VS Code
 .vscode/
+
+# Generated ingestion data
+data/raw/*.jsonl
