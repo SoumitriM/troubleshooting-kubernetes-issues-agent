@@ -124,6 +124,30 @@ numbers with resolution evidence are skipped, legacy duplicates are collapsed,
 and `--limit` specifies the target total number of processed issues. This stage
 does not call an LLM or infer whether an issue was resolved.
 
+## Resolution extraction
+
+Extract a grounded resolution from the collected GitHub evidence using the
+existing FH Genie configuration:
+
+```bash
+python -m app.enrichment.resolution_cli \
+  --input data/processed/kubernetes_issues_with_evidence.jsonl \
+  --output data/processed/kubernetes_issues_with_resolutions.jsonl \
+  --limit 20
+```
+
+The command analyses only the original title and body, comments, linked pull
+requests, and closing commits. It adds a validated `resolution` object with the
+outcome and type, root cause, summary, verified steps, exact evidence URLs, and
+confidence. A closed issue is not treated as fixed without supporting evidence,
+and model-produced URLs must exactly match a URL supplied in the input evidence.
+
+Invalid model output is retried once. Remaining failures are recorded as
+`resolution: null` without stopping later issues, and are retried on a future
+run. Existing successful issue numbers are skipped, duplicate output records
+are collapsed, and `--limit` is the target total of successfully extracted
+resolutions. Use `--overwrite` to start again.
+
 ## Neo4j graph
 
 Start Neo4j Community Edition locally:

@@ -96,3 +96,49 @@ def test_api_key_is_secret_and_redacted() -> None:
 
     assert isinstance(configured.fh_genie_key, SecretStr)
     assert "test-secret" not in repr(configured)
+
+
+def resolution_issue() -> dict[str, object]:
+    return {"title": "Collector loops", "body": "Valid owners keep processing",
+        "resolution_evidence": {"comments": [{"id": 1, "author": "maintainer",
+            "body": "Fixed by the linked commit", "created_at": "2025-01-01T00:00:00Z",
+            "url": "https://github.com/example/project/issues/1#issuecomment-1"}],
+            "linked_pull_requests": [], "closing_commits": [{"sha": "abc123",
+            "url": "https://api.github.com/repos/example/project/commits/abc123"}],
+            "errors": []}}
+
+
+def test_extract_resolution_sends_requested_evidence_and_validates() -> None:
+    api = MagicMock()
+    api.chat.completions.create.return_value = response(
+        '{"resolution_found":true,"resolution_type":"fixed","root_cause":null,'
+        '"resolution_summary":"Fixed by abc123","verified_steps":[],'
+        '"evidence_urls":["https://api.github.com/repos/example/project/commits/abc123"],'
+        '"confidence":"high"}')
+    result = FHGenieClient(settings(), client=api).extract_resolution(resolution_issue())
+    assert result.resolution_type == "fixed"
+    payload = json.loads(api.chat.completions.create.call_args.kwargs["messages"][1]["content"])
+    assert set(payload) == {"title", "body", "comments", "linked_pull_requests", "closing_commits"}
+
+
+def test_extract_resolution_retries_invalid_json_once() -> None:
+    api = MagicMock()
+    api.chat.completions.create.side_effect = [response("not json"), response(
+        '{"resolution_found":false,"resolution_type":"unknown","root_cause":null,'
+        '"resolution_summary":null,"verified_steps":[],"evidence_urls":[],'
+        '"confidence":"low"}')]
+    result = FHGenieClient(settings(), client=api).extract_resolution(resolution_issue())
+    assert result.resolution_found is False
+    assert api.chat.completions.create.call_count == 2
+
+
+def test_extract_resolution_rejects_invented_evidence_url() -> None:
+    api = MagicMock()
+    api.chat.completions.create.return_value = response(
+        '{"resolution_found":true,"resolution_type":"fixed","root_cause":null,'
+        '"resolution_summary":"Fixed","verified_steps":[],'
+        '"evidence_urls":["https://invented.example/fix"],"confidence":"high"}')
+    with pytest.raises(EnrichmentResponseError,
+        match="response contains unsupported evidence URL"):
+        FHGenieClient(settings(), client=api).extract_resolution(resolution_issue())
+    assert api.chat.completions.create.call_count == 2
