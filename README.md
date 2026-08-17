@@ -94,6 +94,13 @@ record is written with `enrichment: null`, its issue number is logged, and the
 remaining issues continue. Issue bodies and sensitive configuration are not
 logged. Generated files under `data/processed/` are ignored by Git.
 
+The command is resumable. If the output already exists, successfully enriched
+issue numbers are skipped and no duplicate output records are written.
+`--limit` is the target total number of successful enrichments, so rerunning
+with `--limit 100` continues from (for example) `Enriching 11/100`. Failed
+records are retried on a later run. To discard the existing output and start
+again explicitly, add `--overwrite`.
+
 ## Neo4j graph
 
 Start Neo4j Community Edition locally:
