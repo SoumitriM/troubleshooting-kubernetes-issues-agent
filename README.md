@@ -1,12 +1,13 @@
 # AI Incident Resolution Platform
 
 Initial FastAPI service for an AI-assisted incident-resolution platform. It
-provides a health endpoint and a GitHub issue ingestion command. It does not
-yet include an LLM, database, frontend, or Kubernetes configuration.
+provides a health endpoint, GitHub issue ingestion, and a local Neo4j graph
+loader. It does not yet include an LLM, frontend, or Kubernetes configuration.
 
 ## Prerequisites
 
 - Python 3.11
+- Docker with Docker Compose
 
 ## Local setup
 
@@ -32,6 +33,8 @@ cp .env.example .env
 
 `GITHUB_TOKEN` is optional for public repositories. Set it in `.env` to use
 authenticated GitHub API rate limits. Never commit the `.env` file.
+
+Set `NEO4J_USERNAME` and `NEO4J_PASSWORD` in `.env` before starting Neo4j.
 
 Run the API locally:
 
@@ -64,13 +67,43 @@ excludes pull requests returned by GitHub's Issues API. Each line contains
 only the issue number, title, body, labels, state, timestamps, comment count,
 and HTML URL. Generated files under `data/raw/` are ignored by Git.
 
+## Neo4j graph
+
+Start Neo4j Community Edition locally:
+
+```bash
+docker compose up -d neo4j
+```
+
+Neo4j Browser is available at `http://localhost:7474`, and the Bolt endpoint
+uses `bolt://localhost:7687`. Database state is retained in the named Docker
+volume `neo4j_data`.
+
+After ingesting the JSONL file, load it into the graph:
+
+```bash
+python -m app.graph.cli --input data/raw/kubernetes_issues.jsonl
+```
+
+The loader derives the repository from each issue URL and uses Cypher `MERGE`
+for `Repository`, `Issue`, and `Label` nodes and their `HAS_ISSUE` and
+`HAS_LABEL` relationships. Re-running it does not duplicate graph entities.
+
+Stop the service without deleting its data:
+
+```bash
+docker compose down
+```
+
 ## Project structure
 
 ```text
 .
 ├── src/app/          # FastAPI application package
+│   ├── graph/        # Neo4j graph loader and CLI
 │   └── ingestion/    # GitHub issue ingestion client and CLI
 ├── tests/            # Automated tests
 ├── .env.example      # Local configuration template
+├── docker-compose.yml # Local Neo4j Community Edition service
 └── pyproject.toml    # Project metadata and dependencies
 ```
