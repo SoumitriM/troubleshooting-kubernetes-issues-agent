@@ -21,12 +21,21 @@ class IssueResolution(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     resolution_found: bool
+    disposition_verified: bool = False
+    actionable_fix_available: bool = False
     resolution_type: ResolutionType
     root_cause: str | None = None
     resolution_summary: str | None = None
     verified_steps: list[str] = Field(default_factory=list)
     evidence_urls: list[str] = Field(default_factory=list)
     confidence: Confidence
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_legacy_disposition(cls, data: object) -> object:
+        if isinstance(data, dict) and "disposition_verified" not in data:
+            return {**data, "disposition_verified": bool(data.get("resolution_found"))}
+        return data
 
     @field_validator("evidence_urls")
     @classmethod
@@ -39,6 +48,20 @@ class IssueResolution(BaseModel):
 
     @model_validator(mode="after")
     def validate_resolution_claim(self) -> Self:
+        if self.disposition_verified != self.resolution_found:
+            raise ValueError("disposition verification must match resolution outcome")
+        if self.actionable_fix_available and (
+            self.resolution_type not in {"fixed", "configuration"}
+            or not self.verified_steps
+        ):
+            raise ValueError("an actionable fix requires a supported fix and steps")
+        if self.resolution_type in {
+            "closed_without_fix",
+            "duplicate",
+            "not_reproducible",
+            "unknown",
+        } and self.actionable_fix_available:
+            raise ValueError("this disposition cannot provide an actionable fix")
         if self.resolution_found:
             if self.resolution_type == "unknown":
                 raise ValueError("a found resolution cannot have unknown type")

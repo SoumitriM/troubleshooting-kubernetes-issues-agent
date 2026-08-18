@@ -131,6 +131,8 @@ def test_load_verified_resolution_merges_evidence_graph(tmp_path: Path) -> None:
     }
     record["resolution"] = {
         "resolution_found": True,
+        "disposition_verified": True,
+        "actionable_fix_available": True,
         "resolution_type": "fixed",
         "root_cause": "Stale owner reference",
         "resolution_summary": "Fixed by pull request 43",
@@ -162,6 +164,8 @@ def test_load_verified_resolution_merges_evidence_graph(tmp_path: Path) -> None:
     assert "DETACH" not in query.upper()
     assert parameters["has_resolution"] is True
     assert parameters["resolution_type"] == "fixed"
+    assert parameters["disposition_verified"] is True
+    assert parameters["actionable_fix_available"] is True
     assert parameters["verified_steps"] == ["Apply the owner-reference fix"]
     assert [item["url"] for item in parameters["pull_requests"]] == [
         pull_url,
@@ -171,6 +175,53 @@ def test_load_verified_resolution_merges_evidence_graph(tmp_path: Path) -> None:
     assert parameters["supported_commit_shas"] == ["abc123"]
     assert [item["id"] for item in parameters["evidence_comments"]] == [1]
     assert parameters["unmatched_evidence_urls"] == [external_url]
+
+
+def test_issue_141293_closed_without_fix_is_never_actionable(tmp_path: Path) -> None:
+    record = issue_record(number=141293)
+    evidence_url = (
+        "https://github.com/kubernetes/kubernetes/issues/141293#issuecomment-1"
+    )
+    record["resolution_evidence"] = {
+        "comments": [
+            {
+                "id": 1,
+                "author": "maintainer",
+                "body": "This is working as designed. /close",
+                "created_at": "2025-01-03T00:00:00Z",
+                "url": evidence_url,
+            }
+        ],
+        "linked_pull_requests": [],
+        "closing_commits": [],
+        "errors": [],
+    }
+    record["resolution"] = {
+        "resolution_found": True,
+        "disposition_verified": True,
+        "actionable_fix_available": False,
+        "resolution_type": "closed_without_fix",
+        "root_cause": None,
+        "resolution_summary": "Closed as working as designed",
+        "verified_steps": [],
+        "evidence_urls": [evidence_url],
+        "confidence": "high",
+    }
+    input_path = tmp_path / "issue-141293.jsonl"
+    input_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    driver = MagicMock()
+    session = driver.session.return_value.__enter__.return_value
+    transaction = MagicMock()
+    session.execute_write.side_effect = (
+        lambda callback, issue: callback(transaction, issue)
+    )
+
+    GraphLoader(driver).load_jsonl(input_path)
+
+    parameters = transaction.run.call_args.kwargs
+    assert parameters["issue_number"] == 141293
+    assert parameters["disposition_verified"] is True
+    assert parameters["actionable_fix_available"] is False
 
 
 def test_resolution_found_false_does_not_create_resolution_evidence(tmp_path: Path) -> None:

@@ -74,6 +74,8 @@ class GraphLoader:
             issue_number: $issue_number
         })
         SET resolution.resolution_type = $resolution_type,
+            resolution.disposition_verified = $disposition_verified,
+            resolution.actionable_fix_available = $actionable_fix_available,
             resolution.root_cause = $root_cause,
             resolution.resolution_summary = $resolution_summary,
             resolution.verified_steps = $verified_steps,
@@ -213,6 +215,12 @@ class GraphLoader:
             ),
             has_resolution=has_resolution,
             resolution_type=resolution.resolution_type if has_resolution else None,
+            disposition_verified=(
+                resolution.disposition_verified if has_resolution else False
+            ),
+            actionable_fix_available=(
+                resolution.actionable_fix_available if has_resolution else False
+            ),
             root_cause=resolution.root_cause if has_resolution else None,
             resolution_summary=(
                 resolution.resolution_summary if has_resolution else None

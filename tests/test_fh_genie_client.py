@@ -119,6 +119,13 @@ def test_extract_resolution_sends_requested_evidence_and_validates() -> None:
     assert result.resolution_type == "fixed"
     payload = json.loads(api.chat.completions.create.call_args.kwargs["messages"][1]["content"])
     assert set(payload) == {"title", "body", "comments", "linked_pull_requests", "closing_commits"}
+    system_prompt = api.chat.completions.create.call_args.kwargs["messages"][0][
+        "content"
+    ]
+    assert "disposition_verified" in system_prompt
+    assert "actionable_fix_available" in system_prompt
+    assert result.disposition_verified is True
+    assert result.actionable_fix_available is False
 
 
 def test_extract_resolution_retries_invalid_json_once() -> None:

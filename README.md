@@ -141,6 +141,10 @@ requests, and closing commits. It adds a validated `resolution` object with the
 outcome and type, root cause, summary, verified steps, exact evidence URLs, and
 confidence. A closed issue is not treated as fixed without supporting evidence,
 and model-produced URLs must exactly match a URL supplied in the input evidence.
+Every resolution also records whether its disposition is verified and whether
+an actionable fix is available. Only `fixed` and `configuration` outcomes with
+supported verified steps can be actionable; closure without a fix, duplicates,
+non-reproducible outcomes, and unknown outcomes are never actionable solutions.
 
 Invalid model output is retried once. Remaining failures are recorded as
 `resolution: null` without stopping later issues, and are retried on a future
@@ -245,8 +249,12 @@ The result is one JSON object containing the query, deduplicated vector-matched
 issues with similarity scores and graph metadata, and up to three additional
 issues sharing a component or Kubernetes version. This retrieval step is
 bounded and does not call FH Genie or another language model. When available,
-matched and related issues include `verified_resolution` with its type, root
-cause, summary, verified steps, confidence, and supporting evidence URLs.
+matched and related issues include `verified_disposition` with its type, root
+cause, summary, confidence, and supporting evidence URLs. A separate
+`actionable_fix` object is returned only for supported `fixed` or
+`configuration` outcomes with verified steps. In particular,
+`closed_without_fix` is retained as disposition context but never offered as a
+solution.
 
 ## Project structure
 

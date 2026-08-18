@@ -19,12 +19,21 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
             "kubernetes_versions": ["v1.31"],
             "labels": ["bug"],
             "error_messages": ["owner reference missing"],
-            "verified_resolution": {
+            "verified_disposition": {
                 "resolution_found": True,
+                "disposition_verified": True,
+                "actionable_fix_available": True,
                 "resolution_type": "fixed",
                 "root_cause": "Stale owner reference",
                 "resolution_summary": "Fixed by PR 12",
-                "verified_steps": [],
+                "verified_steps": ["Apply PR 12"],
+                "confidence": "high",
+                "evidence_urls": ["https://github.com/example/project/pull/12"],
+            },
+            "actionable_fix": {
+                "resolution_type": "fixed",
+                "resolution_summary": "Fixed by PR 12",
+                "verified_steps": ["Apply PR 12"],
                 "confidence": "high",
                 "evidence_urls": ["https://github.com/example/project/pull/12"],
             },
@@ -40,7 +49,8 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
             "kubernetes_versions": ["v1.31"],
             "labels": ["kind/bug"],
             "error_messages": [],
-            "verified_resolution": None,
+            "verified_disposition": None,
+            "actionable_fix": None,
         },
     ]
     related_result = MagicMock()
@@ -53,10 +63,19 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
             "url": "https://github.com/kubernetes/kubernetes/issues/9",
             "shared_components": ["garbage collector"],
             "shared_versions": ["v1.31"],
-            "verified_resolution": {
+            "verified_disposition": {
                 "resolution_found": True,
+                "disposition_verified": True,
+                "actionable_fix_available": True,
                 "resolution_type": "configuration",
                 "root_cause": "Invalid setting",
+                "resolution_summary": "Configuration corrected",
+                "verified_steps": ["Update the setting"],
+                "confidence": "medium",
+                "evidence_urls": ["https://github.com/example/project/issues/9"],
+            },
+            "actionable_fix": {
+                "resolution_type": "configuration",
                 "resolution_summary": "Configuration corrected",
                 "verified_steps": ["Update the setting"],
                 "confidence": "medium",
@@ -73,12 +92,15 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
     assert context["query"] == "valid owners"
     assert context["matched_issues"][0]["score"] == 0.94
     assert context["matched_issues"][0]["labels"] == ["bug"]
-    assert context["matched_issues"][0]["verified_resolution"]["confidence"] == "high"
-    assert context["matched_issues"][0]["verified_resolution"][
+    assert context["matched_issues"][0]["verified_disposition"]["confidence"] == "high"
+    assert context["matched_issues"][0]["verified_disposition"][
         "resolution_found"
     ] is True
+    assert context["matched_issues"][0]["actionable_fix"]["verified_steps"] == [
+        "Apply PR 12"
+    ]
     assert context["related_issues"][0]["issue_number"] == 9
-    assert context["related_issues"][0]["verified_resolution"][
+    assert context["related_issues"][0]["verified_disposition"][
         "evidence_urls"
     ] == ["https://github.com/example/project/issues/9"]
     vector_call, expansion_call = session.run.call_args_list
@@ -91,7 +113,9 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
     assert vector_call.args[0].count("CALL {") == 5
     assert "[:HAS_RESOLUTION]" in vector_call.args[0]
     assert "[:SUPPORTED_BY]" in vector_call.args[0]
-    assert "verified_resolution" in expansion_call.args[0]
+    assert "verified_disposition" in expansion_call.args[0]
+    assert "actionable_fix" in expansion_call.args[0]
+    assert "['fixed', 'configuration']" in vector_call.args[0]
     assert expansion_call.kwargs["expansion_limit"] == 3
     assert expansion_call.kwargs["component_names"] == [
         "api machinery",
@@ -142,3 +166,48 @@ def test_retrieve_skips_expansion_without_components_or_versions() -> None:
     assert len(context["matched_issues"]) == 1
     assert context["related_issues"] == []
     assert session.run.call_count == 1
+
+
+def test_issue_141293_is_disposition_context_not_an_actionable_solution() -> None:
+    driver = MagicMock()
+    session = driver.session.return_value.__enter__.return_value
+    result = MagicMock()
+    result.data.return_value = [
+        {
+            "repository": "kubernetes/kubernetes",
+            "issue_number": 141293,
+            "title": "Working as designed",
+            "summary": "Closed without a code fix",
+            "url": "https://github.com/kubernetes/kubernetes/issues/141293",
+            "score": 0.92,
+            "components": [],
+            "kubernetes_versions": [],
+            "labels": ["support"],
+            "error_messages": [],
+            "verified_disposition": {
+                "resolution_found": True,
+                "disposition_verified": True,
+                "actionable_fix_available": False,
+                "resolution_type": "closed_without_fix",
+                "root_cause": None,
+                "resolution_summary": "Closed as working as designed",
+                "verified_steps": [],
+                "confidence": "high",
+                "evidence_urls": [
+                    "https://github.com/kubernetes/kubernetes/issues/141293#issuecomment-1"
+                ],
+            },
+            "actionable_fix": None,
+        }
+    ]
+    session.run.return_value = result
+    embedder = MagicMock()
+    embedder.encode_query.return_value = [0.0] * 384
+
+    context = GraphRetriever(driver, embedder).retrieve("possible solution")
+
+    issue = context["matched_issues"][0]
+    assert issue["issue_number"] == 141293
+    assert issue["verified_disposition"]["disposition_verified"] is True
+    assert issue["verified_disposition"]["resolution_type"] == "closed_without_fix"
+    assert issue["actionable_fix"] is None

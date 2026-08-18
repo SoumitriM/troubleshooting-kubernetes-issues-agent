@@ -43,15 +43,31 @@ class GraphRetriever:
         OPTIONAL MATCH (issue)-[:HAS_RESOLUTION]->(resolution:Resolution)
         OPTIONAL MATCH (resolution)-[:SUPPORTED_BY]->(source)
         WITH resolution, collect(DISTINCT source.url) AS evidence_urls
-        RETURN CASE WHEN resolution IS NULL THEN null ELSE resolution {{
+        WITH resolution, evidence_urls,
+             CASE WHEN resolution IS NULL THEN null ELSE resolution {{
             resolution_found: true,
+            .disposition_verified,
+            .actionable_fix_available,
             .resolution_type,
             .root_cause,
             .resolution_summary,
             .verified_steps,
             .confidence,
             evidence_urls: evidence_urls
-        }} END AS verified_resolution
+        }} END AS verified_disposition
+        RETURN verified_disposition,
+               CASE WHEN resolution.actionable_fix_available = true
+                          AND resolution.resolution_type IN ['fixed', 'configuration']
+                          AND size(coalesce(resolution.verified_steps, [])) > 0
+                    THEN resolution {{
+                        .resolution_type,
+                        .resolution_summary,
+                        .verified_steps,
+                        .confidence,
+                        evidence_urls: evidence_urls
+                    }}
+                    ELSE null
+               END AS actionable_fix
     }}
     RETURN issue.repository AS repository,
            issue.issue_number AS issue_number,
@@ -63,7 +79,8 @@ class GraphRetriever:
            kubernetes_versions,
            labels,
            error_messages,
-           verified_resolution
+           verified_disposition,
+           actionable_fix
     ORDER BY score DESC
     """
 
@@ -104,15 +121,31 @@ class GraphRetriever:
         OPTIONAL MATCH (issue)-[:HAS_RESOLUTION]->(resolution:Resolution)
         OPTIONAL MATCH (resolution)-[:SUPPORTED_BY]->(source)
         WITH resolution, collect(DISTINCT source.url) AS evidence_urls
-        RETURN CASE WHEN resolution IS NULL THEN null ELSE resolution {
+        WITH resolution, evidence_urls,
+             CASE WHEN resolution IS NULL THEN null ELSE resolution {
             resolution_found: true,
+            .disposition_verified,
+            .actionable_fix_available,
             .resolution_type,
             .root_cause,
             .resolution_summary,
             .verified_steps,
             .confidence,
             evidence_urls: evidence_urls
-        } END AS verified_resolution
+        } END AS verified_disposition
+        RETURN verified_disposition,
+               CASE WHEN resolution.actionable_fix_available = true
+                          AND resolution.resolution_type IN ['fixed', 'configuration']
+                          AND size(coalesce(resolution.verified_steps, [])) > 0
+                    THEN resolution {
+                        .resolution_type,
+                        .resolution_summary,
+                        .verified_steps,
+                        .confidence,
+                        evidence_urls: evidence_urls
+                    }
+                    ELSE null
+               END AS actionable_fix
     }
     RETURN issue.repository AS repository,
            issue.issue_number AS issue_number,
@@ -121,7 +154,8 @@ class GraphRetriever:
            issue.html_url AS url,
            shared_components,
            shared_versions,
-           verified_resolution
+           verified_disposition,
+           actionable_fix
     ORDER BY size(shared_components) + size(shared_versions) DESC,
              issue.issue_number DESC
     LIMIT $expansion_limit

@@ -9,6 +9,7 @@ from app.enrichment.fh_genie_client import (
     EnrichmentSettings,
     FHGenieClient,
 )
+from app.enrichment.resolution_models import IssueResolution
 
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,17 @@ def read_existing_output(path: Path) -> dict[str, dict[str, Any]]:
         return {}
     records: dict[str, dict[str, Any]] = {}
     for record in read_jsonl(path):
+        resolution = record.get("resolution")
+        if isinstance(resolution, dict):
+            try:
+                record = {
+                    **record,
+                    "resolution": IssueResolution.model_validate(
+                        resolution
+                    ).model_dump(mode="json"),
+                }
+            except ValueError:
+                record = {**record, "resolution": None}
         records[issue_key(record, path)] = record
     return records
 

@@ -34,7 +34,10 @@ def test_resolution_extraction_preserves_fields_and_resumes_without_duplicates(t
     input_path, output_path = tmp_path / "input.jsonl", tmp_path / "output.jsonl"
     issues = [issue_record(1), issue_record(2), issue_record(3)]
     write_jsonl(input_path, issues)
-    completed = {**issues[0], "resolution": unresolved().model_dump()}
+    legacy_resolution = unresolved().model_dump()
+    legacy_resolution.pop("disposition_verified")
+    legacy_resolution.pop("actionable_fix_available")
+    completed = {**issues[0], "resolution": legacy_resolution}
     write_jsonl(output_path, [completed, completed])
     client = MagicMock(); client.extract_resolution.return_value = unresolved()
     assert resolution_cli.extract_resolutions(input_path, output_path, client, limit=2) == (1, 0)
@@ -43,6 +46,8 @@ def test_resolution_extraction_preserves_fields_and_resumes_without_duplicates(t
     assert output[1]["body"] == "Original body"
     assert output[1]["enrichment"] == {"summary": "Preserved summary"}
     assert "resolution_evidence" in output[1]
+    assert output[0]["resolution"]["disposition_verified"] is False
+    assert output[0]["resolution"]["actionable_fix_available"] is False
     client.extract_resolution.assert_called_once_with(issues[1])
 
 
