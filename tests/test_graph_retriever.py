@@ -19,6 +19,15 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
             "kubernetes_versions": ["v1.31"],
             "labels": ["bug"],
             "error_messages": ["owner reference missing"],
+            "verified_resolution": {
+                "resolution_found": True,
+                "resolution_type": "fixed",
+                "root_cause": "Stale owner reference",
+                "resolution_summary": "Fixed by PR 12",
+                "verified_steps": [],
+                "confidence": "high",
+                "evidence_urls": ["https://github.com/example/project/pull/12"],
+            },
         },
         {
             "repository": "kubernetes/kubernetes",
@@ -31,6 +40,7 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
             "kubernetes_versions": ["v1.31"],
             "labels": ["kind/bug"],
             "error_messages": [],
+            "verified_resolution": None,
         },
     ]
     related_result = MagicMock()
@@ -43,6 +53,15 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
             "url": "https://github.com/kubernetes/kubernetes/issues/9",
             "shared_components": ["garbage collector"],
             "shared_versions": ["v1.31"],
+            "verified_resolution": {
+                "resolution_found": True,
+                "resolution_type": "configuration",
+                "root_cause": "Invalid setting",
+                "resolution_summary": "Configuration corrected",
+                "verified_steps": ["Update the setting"],
+                "confidence": "medium",
+                "evidence_urls": ["https://github.com/example/project/issues/9"],
+            },
         }
     ]
     session.run.side_effect = [matched_result, related_result]
@@ -54,7 +73,14 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
     assert context["query"] == "valid owners"
     assert context["matched_issues"][0]["score"] == 0.94
     assert context["matched_issues"][0]["labels"] == ["bug"]
+    assert context["matched_issues"][0]["verified_resolution"]["confidence"] == "high"
+    assert context["matched_issues"][0]["verified_resolution"][
+        "resolution_found"
+    ] is True
     assert context["related_issues"][0]["issue_number"] == 9
+    assert context["related_issues"][0]["verified_resolution"][
+        "evidence_urls"
+    ] == ["https://github.com/example/project/issues/9"]
     vector_call, expansion_call = session.run.call_args_list
     assert "db.index.vector.queryNodes" in vector_call.args[0]
     assert vector_call.kwargs["vector_limit"] == 5
@@ -62,7 +88,10 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
     assert "collect(DISTINCT version.version)" in vector_call.args[0]
     assert "collect(DISTINCT label.name)" in vector_call.args[0]
     assert "collect(DISTINCT error.message)" in vector_call.args[0]
-    assert vector_call.args[0].count("CALL {") == 4
+    assert vector_call.args[0].count("CALL {") == 5
+    assert "[:HAS_RESOLUTION]" in vector_call.args[0]
+    assert "[:SUPPORTED_BY]" in vector_call.args[0]
+    assert "verified_resolution" in expansion_call.args[0]
     assert expansion_call.kwargs["expansion_limit"] == 3
     assert expansion_call.kwargs["component_names"] == [
         "api machinery",

@@ -90,6 +90,132 @@ def test_load_enriched_issue_merges_normalized_graph_entities(tmp_path: Path) ->
     assert parameters["kubernetes_versions"] == ["v1.30.1", "v1.31.0"]
 
 
+def test_load_verified_resolution_merges_evidence_graph(tmp_path: Path) -> None:
+    record = issue_record()
+    comment_url = "https://github.com/kubernetes/kubernetes/issues/42#issuecomment-1"
+    uncited_comment_url = (
+        "https://github.com/kubernetes/kubernetes/issues/42#issuecomment-2"
+    )
+    pull_url = "https://github.com/kubernetes/kubernetes/pull/43"
+    uncited_pull_url = "https://github.com/kubernetes/kubernetes/pull/44"
+    commit_url = "https://api.github.com/repos/kubernetes/kubernetes/commits/abc123"
+    external_url = "https://github.com/kubernetes/kubernetes/issues/99"
+    record["resolution_evidence"] = {
+        "comments": [
+            {
+                "id": 1,
+                "author": "maintainer",
+                "body": "Fixed by the linked pull request",
+                "created_at": "2025-01-03T00:00:00Z",
+                "url": comment_url,
+            },
+            {
+                "id": 2,
+                "author": "reporter",
+                "body": "Thanks",
+                "created_at": "2025-01-04T00:00:00Z",
+                "url": uncited_comment_url,
+            },
+        ],
+        "linked_pull_requests": [
+            {"number": 43, "title": "Fix issue", "state": "closed", "url": pull_url},
+            {
+                "number": 44,
+                "title": "Related work",
+                "state": "open",
+                "url": uncited_pull_url,
+            },
+        ],
+        "closing_commits": [{"sha": "abc123", "url": commit_url}],
+        "errors": [],
+    }
+    record["resolution"] = {
+        "resolution_found": True,
+        "resolution_type": "fixed",
+        "root_cause": "Stale owner reference",
+        "resolution_summary": "Fixed by pull request 43",
+        "verified_steps": ["Apply the owner-reference fix"],
+        "evidence_urls": [comment_url, pull_url, commit_url, external_url],
+        "confidence": "high",
+    }
+    input_path = tmp_path / "resolved.jsonl"
+    input_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    driver = MagicMock()
+    session = driver.session.return_value.__enter__.return_value
+    transaction = MagicMock()
+    session.execute_write.side_effect = (
+        lambda callback, issue: callback(transaction, issue)
+    )
+
+    assert GraphLoader(driver).load_jsonl(input_path) == 1
+
+    query = transaction.run.call_args.args[0]
+    parameters = transaction.run.call_args.kwargs
+    assert "MERGE (resolution:Resolution" in query
+    assert "MERGE (issue)-[:HAS_RESOLUTION]->(resolution)" in query
+    assert "MERGE (pull_request:PullRequest {url:" in query
+    assert "MERGE (commit:Commit {sha:" in query
+    assert "MERGE (comment:Comment {id:" in query
+    assert "MERGE (source:EvidenceSource {url:" in query
+    assert "MERGE (resolution)-[:SUPPORTED_BY]->" in query
+    assert "DELETE" not in query.upper()
+    assert "DETACH" not in query.upper()
+    assert parameters["has_resolution"] is True
+    assert parameters["resolution_type"] == "fixed"
+    assert parameters["verified_steps"] == ["Apply the owner-reference fix"]
+    assert [item["url"] for item in parameters["pull_requests"]] == [
+        pull_url,
+        uncited_pull_url,
+    ]
+    assert parameters["supported_pull_request_urls"] == [pull_url]
+    assert parameters["supported_commit_shas"] == ["abc123"]
+    assert [item["id"] for item in parameters["evidence_comments"]] == [1]
+    assert parameters["unmatched_evidence_urls"] == [external_url]
+
+
+def test_resolution_found_false_does_not_create_resolution_evidence(tmp_path: Path) -> None:
+    record = issue_record()
+    record["resolution_evidence"] = {
+        "comments": [],
+        "linked_pull_requests": [
+            {
+                "number": 43,
+                "title": "Possibly related",
+                "state": "open",
+                "url": "https://github.com/kubernetes/kubernetes/pull/43",
+            }
+        ],
+        "closing_commits": [],
+        "errors": [],
+    }
+    record["resolution"] = {
+        "resolution_found": False,
+        "resolution_type": "unknown",
+        "root_cause": None,
+        "resolution_summary": None,
+        "verified_steps": [],
+        "evidence_urls": [],
+        "confidence": "low",
+    }
+    input_path = tmp_path / "unresolved.jsonl"
+    input_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    driver = MagicMock()
+    session = driver.session.return_value.__enter__.return_value
+    transaction = MagicMock()
+    session.execute_write.side_effect = (
+        lambda callback, issue: callback(transaction, issue)
+    )
+
+    GraphLoader(driver).load_jsonl(input_path)
+
+    parameters = transaction.run.call_args.kwargs
+    assert parameters["has_resolution"] is False
+    assert parameters["pull_requests"] == []
+    assert parameters["closing_commits"] == []
+    assert parameters["evidence_comments"] == []
+    assert parameters["unmatched_evidence_urls"] == []
+
+
 def test_graph_password_is_redacted() -> None:
     settings = GraphSettings(
         _env_file=None,

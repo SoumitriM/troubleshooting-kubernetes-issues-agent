@@ -38,6 +38,21 @@ class GraphRetriever:
         OPTIONAL MATCH (issue)-[:HAS_ERROR]->(error:ErrorMessage)
         RETURN collect(DISTINCT error.message) AS error_messages
     }}
+    CALL {{
+        WITH issue
+        OPTIONAL MATCH (issue)-[:HAS_RESOLUTION]->(resolution:Resolution)
+        OPTIONAL MATCH (resolution)-[:SUPPORTED_BY]->(source)
+        WITH resolution, collect(DISTINCT source.url) AS evidence_urls
+        RETURN CASE WHEN resolution IS NULL THEN null ELSE resolution {{
+            resolution_found: true,
+            .resolution_type,
+            .root_cause,
+            .resolution_summary,
+            .verified_steps,
+            .confidence,
+            evidence_urls: evidence_urls
+        }} END AS verified_resolution
+    }}
     RETURN issue.repository AS repository,
            issue.issue_number AS issue_number,
            issue.title AS title,
@@ -47,7 +62,8 @@ class GraphRetriever:
            components,
            kubernetes_versions,
            labels,
-           error_messages
+           error_messages,
+           verified_resolution
     ORDER BY score DESC
     """
 
@@ -83,13 +99,29 @@ class GraphRetriever:
          [name IN issue_versions WHERE name IN $version_names]
              AS shared_versions
     WHERE size(shared_components) > 0 OR size(shared_versions) > 0
+    CALL {
+        WITH issue
+        OPTIONAL MATCH (issue)-[:HAS_RESOLUTION]->(resolution:Resolution)
+        OPTIONAL MATCH (resolution)-[:SUPPORTED_BY]->(source)
+        WITH resolution, collect(DISTINCT source.url) AS evidence_urls
+        RETURN CASE WHEN resolution IS NULL THEN null ELSE resolution {
+            resolution_found: true,
+            .resolution_type,
+            .root_cause,
+            .resolution_summary,
+            .verified_steps,
+            .confidence,
+            evidence_urls: evidence_urls
+        } END AS verified_resolution
+    }
     RETURN issue.repository AS repository,
            issue.issue_number AS issue_number,
            issue.title AS title,
            issue.summary AS summary,
            issue.html_url AS url,
            shared_components,
-           shared_versions
+           shared_versions,
+           verified_resolution
     ORDER BY size(shared_components) + size(shared_versions) DESC,
              issue.issue_number DESC
     LIMIT $expansion_limit

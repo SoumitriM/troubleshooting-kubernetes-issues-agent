@@ -173,6 +173,13 @@ python -m app.graph.cli \
   --input data/processed/kubernetes_issues_enriched.jsonl
 ```
 
+It can also load records containing verified resolutions and their evidence:
+
+```bash
+python -m app.graph.cli \
+  --input data/processed/kubernetes_issues_with_resolutions.jsonl
+```
+
 The loader derives the repository from each issue URL and uses Cypher `MERGE`
 for all nodes and relationships. Existing `Repository`, `Issue`, and `Label`
 entities are preserved. Enriched records update the issue's `summary`,
@@ -182,6 +189,15 @@ entities are preserved. Enriched records update the issue's `summary`,
 are trimmed and lowercased for matching. Re-running either raw or enriched
 loads does not duplicate graph entities, and the loader never clears existing
 Neo4j data.
+
+When `resolution_found` is true, the loader merges a stable `Resolution` node
+and connects it through `HAS_RESOLUTION`. Pull requests and closing commits are
+merged and connected through `LINKED_TO_PR` and `CLOSED_BY`. Only comments cited
+by `evidence_urls` are stored. Each cited URL supports the resolution through a
+`SUPPORTED_BY` relationship to its matching `Comment`, `PullRequest`, or
+`Commit`; unmatched cited URLs become `EvidenceSource` nodes. Records without a
+verified resolution create none of these resolution-evidence entities. All
+nodes and relationships use `MERGE`, and existing graph data is never deleted.
 
 Stop the service without deleting its data:
 
@@ -228,7 +244,9 @@ python -m app.retrieval.cli graph-search \
 The result is one JSON object containing the query, deduplicated vector-matched
 issues with similarity scores and graph metadata, and up to three additional
 issues sharing a component or Kubernetes version. This retrieval step is
-bounded and does not call FH Genie or another language model.
+bounded and does not call FH Genie or another language model. When available,
+matched and related issues include `verified_resolution` with its type, root
+cause, summary, verified steps, confidence, and supporting evidence URLs.
 
 ## Project structure
 

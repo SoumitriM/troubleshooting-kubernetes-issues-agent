@@ -7,7 +7,9 @@ from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.enrichment.models import IssueEnrichment
+from app.enrichment.resolution_models import IssueResolution
 from app.ingestion.github_client import GitHubIssue
+from app.ingestion.resolution_client import ResolutionEvidence
 
 
 class GraphSettings(BaseSettings):
@@ -24,6 +26,8 @@ class GraphIssueRecord(GitHubIssue):
     """A normalized issue with optional FH Genie enrichment."""
 
     enrichment: IssueEnrichment | None = None
+    resolution_evidence: ResolutionEvidence | None = None
+    resolution: IssueResolution | None = None
 
 
 class GraphLoader:
@@ -64,6 +68,67 @@ class GraphLoader:
         MERGE (error:ErrorMessage {message: error_text})
         MERGE (issue)-[:HAS_ERROR]->(error)
     )
+    FOREACH (_ IN CASE WHEN $has_resolution THEN [1] ELSE [] END |
+        MERGE (resolution:Resolution {
+            repository: $repository_key,
+            issue_number: $issue_number
+        })
+        SET resolution.resolution_type = $resolution_type,
+            resolution.root_cause = $root_cause,
+            resolution.resolution_summary = $resolution_summary,
+            resolution.verified_steps = $verified_steps,
+            resolution.confidence = $confidence
+        MERGE (issue)-[:HAS_RESOLUTION]->(resolution)
+    )
+    FOREACH (pull IN $pull_requests |
+        MERGE (pull_request:PullRequest {url: pull.url})
+        SET pull_request.number = pull.number,
+            pull_request.title = pull.title,
+            pull_request.state = pull.state
+        MERGE (issue)-[:LINKED_TO_PR]->(pull_request)
+    )
+    FOREACH (pull_url IN $supported_pull_request_urls |
+        MERGE (resolution:Resolution {
+            repository: $repository_key,
+            issue_number: $issue_number
+        })
+        MERGE (pull_request:PullRequest {url: pull_url})
+        MERGE (resolution)-[:SUPPORTED_BY]->(pull_request)
+    )
+    FOREACH (commit_data IN $closing_commits |
+        MERGE (commit:Commit {sha: commit_data.sha})
+        SET commit.url = commit_data.url
+        MERGE (issue)-[:CLOSED_BY]->(commit)
+    )
+    FOREACH (sha IN $supported_commit_shas |
+        MERGE (resolution:Resolution {
+            repository: $repository_key,
+            issue_number: $issue_number
+        })
+        MERGE (commit:Commit {sha: sha})
+        MERGE (resolution)-[:SUPPORTED_BY]->(commit)
+    )
+    FOREACH (comment_data IN $evidence_comments |
+        MERGE (comment:Comment {id: comment_data.id})
+        SET comment.author = comment_data.author,
+            comment.body = comment_data.body,
+            comment.created_at = comment_data.created_at,
+            comment.url = comment_data.url
+        MERGE (issue)-[:HAS_COMMENT]->(comment)
+        MERGE (resolution:Resolution {
+            repository: $repository_key,
+            issue_number: $issue_number
+        })
+        MERGE (resolution)-[:SUPPORTED_BY]->(comment)
+    )
+    FOREACH (evidence_url IN $unmatched_evidence_urls |
+        MERGE (source:EvidenceSource {url: evidence_url})
+        MERGE (resolution:Resolution {
+            repository: $repository_key,
+            issue_number: $issue_number
+        })
+        MERGE (resolution)-[:SUPPORTED_BY]->(source)
+    )
     """
 
     def __init__(self, driver: Driver) -> None:
@@ -92,12 +157,38 @@ class GraphLoader:
     def _merge_issue(cls, transaction: Any, issue: GraphIssueRecord) -> None:
         owner, repository_name = cls._repository_from_url(issue.html_url)
         enrichment = issue.enrichment
+        resolution = issue.resolution
+        has_resolution = resolution is not None and resolution.resolution_found
+        evidence = issue.resolution_evidence
+        evidence_urls = set(resolution.evidence_urls) if has_resolution else set()
+        pull_requests = evidence.linked_pull_requests if evidence and has_resolution else []
+        closing_commits = evidence.closing_commits if evidence and has_resolution else []
+        evidence_comments = (
+            [comment for comment in evidence.comments if comment.url in evidence_urls]
+            if evidence and has_resolution
+            else []
+        )
+        matched_urls = {
+            comment.url for comment in evidence_comments
+        } | {
+            pull.url for pull in pull_requests if pull.url in evidence_urls
+        } | {
+            commit.url for commit in closing_commits if commit.url in evidence_urls
+        }
         result = transaction.run(
             cls.LOAD_ISSUE_QUERY,
             owner=owner,
             repository_name=repository_name,
             repository_key=f"{owner}/{repository_name}",
-            **issue.model_dump(mode="json", exclude={"labels", "enrichment"}),
+            **issue.model_dump(
+                mode="json",
+                exclude={
+                    "labels",
+                    "enrichment",
+                    "resolution_evidence",
+                    "resolution",
+                },
+            ),
             labels=issue.labels,
             has_enrichment=enrichment is not None,
             summary=enrichment.summary if enrichment else None,
@@ -120,6 +211,28 @@ class GraphLoader:
                 if enrichment
                 else []
             ),
+            has_resolution=has_resolution,
+            resolution_type=resolution.resolution_type if has_resolution else None,
+            root_cause=resolution.root_cause if has_resolution else None,
+            resolution_summary=(
+                resolution.resolution_summary if has_resolution else None
+            ),
+            verified_steps=resolution.verified_steps if has_resolution else [],
+            confidence=resolution.confidence if has_resolution else None,
+            pull_requests=[pull.model_dump(mode="json") for pull in pull_requests],
+            supported_pull_request_urls=[
+                pull.url for pull in pull_requests if pull.url in evidence_urls
+            ],
+            closing_commits=[
+                commit.model_dump(mode="json") for commit in closing_commits
+            ],
+            supported_commit_shas=[
+                commit.sha for commit in closing_commits if commit.url in evidence_urls
+            ],
+            evidence_comments=[
+                comment.model_dump(mode="json") for comment in evidence_comments
+            ],
+            unmatched_evidence_urls=list(evidence_urls - matched_urls),
         )
         result.consume()
 
