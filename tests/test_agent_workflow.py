@@ -1,7 +1,7 @@
 from typing import Any
 
 from app.agent.nodes import AgentSettings, IncidentNodes
-from app.agent.state import GroundedFixAnswer
+from app.agent.state import GroundedFixAnswer, QueryAnalysis
 from app.agent.workflow import build_workflow
 from app.enrichment.models import IssueEnrichment
 
@@ -64,17 +64,21 @@ class FakeRetriever:
     def __init__(self, context: dict[str, Any]) -> None:
         self.context = context
         self.calls = 0
+        self.query_analysis: QueryAnalysis | None = None
 
-    def retrieve(self, query: str, limit: int, **kwargs: Any) -> dict[str, Any]:
+    def search(
+        self,
+        *,
+        query_text: str,
+        query_analysis: QueryAnalysis,
+        limit: int,
+        debug: bool,
+    ) -> dict[str, Any]:
         self.calls += 1
-        assert query
+        assert query_text
         assert limit == 5
-        assert set(kwargs) == {
-            "components",
-            "kubernetes_version",
-            "error_messages",
-            "symptom",
-        }
+        assert debug is False
+        self.query_analysis = query_analysis
         return self.context
 
 
@@ -206,6 +210,30 @@ def test_no_close_match_requests_logs_and_reports_no_historical_match() -> None:
     assert retriever.calls == 1
 
 
+def test_cross_version_context_is_not_offered_as_a_solution() -> None:
+    cross_version = matched_issue(0.9, actionable=True)
+    cross_version["kubernetes_versions"] = ["v1.29.15"]
+    cross_version["relevance"] = {
+        "cross_version_match": True,
+        "version_match_type": "conflict",
+        "conflicting_versions": ["v1.29.15"],
+    }
+    result, fh_genie, _retriever = run_workflow(
+        {
+            "matched_issues": [],
+            "cross_version_matches": [cross_version],
+            "related_issues": [],
+            "no_close_match": True,
+        }
+    )
+
+    assert result["route"] == "request_clarification"
+    assert "similar symptom exists in another Kubernetes version" in result["answer"]
+    assert "must not be assumed to apply" in result["answer"]
+    assert result["citations"] == []
+    assert fh_genie.fix_calls == 0
+
+
 def test_request_clarification_route_for_low_similarity() -> None:
     context = {"matched_issues": [matched_issue(0.2, actionable=True)], "related_issues": []}
 
@@ -305,6 +333,13 @@ def test_specific_crashloop_query_calls_retrieval() -> None:
     assert "affected component" not in request
     assert "Kubernetes version" not in request
     assert result["retrieved_context"]["related_issues"] == []
+    assert retriever.query_analysis is not None
+    assert retriever.query_analysis.components == ["kubelet"]
+    assert retriever.query_analysis.kubernetes_version == "v1.35"
+    assert retriever.query_analysis.error_messages == ["CrashLoopBackOff"]
+    assert retriever.query_analysis.symptom == (
+        "Pods enter CrashLoopBackOff after kubelet restart"
+    )
     assert retriever.calls == 1
 
 

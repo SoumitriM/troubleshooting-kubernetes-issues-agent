@@ -6,6 +6,7 @@ from neo4j import Driver
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.agent.state import QueryAnalysis
 from app.retrieval.embeddings import IssueEmbedder
 from app.retrieval.vector_store import IssueVectorStore
 
@@ -228,22 +229,19 @@ class GraphRetriever:
         self._embedder = embedder
         self._settings = settings or GraphRetrieverSettings()
 
-    def retrieve(
+    def search(
         self,
-        query: str,
-        limit: int = MAX_VECTOR_MATCHES,
         *,
-        components: list[str] | None = None,
-        kubernetes_version: str | None = None,
-        error_messages: list[str] | None = None,
-        symptom: str | None = None,
+        query_text: str,
+        query_analysis: QueryAnalysis | None = None,
+        limit: int = MAX_VECTOR_MATCHES,
         debug: bool = False,
     ) -> dict[str, Any]:
-        """Rerank vector candidates and expand only accepted direct matches."""
+        """Search by raw text and optionally apply structured deterministic reranking."""
 
         accepted_limit = min(limit, self.MAX_VECTOR_MATCHES)
         vector_limit = max(self.MIN_CANDIDATE_POOL, accepted_limit * 4)
-        embedding = self._embedder.encode_query(query)
+        embedding = self._embedder.encode_query(query_text)
         with self._driver.session() as session:
             candidates = [
                 dict(record)
@@ -255,18 +253,18 @@ class GraphRetriever:
             ]
             provisionally_accepted: list[dict[str, Any]] = []
             rejected: list[dict[str, Any]] = []
+            cross_version: list[dict[str, Any]] = []
             for candidate in candidates:
-                explanation = self._relevance_explanation(
-                    candidate,
-                    query=query,
-                    components=components or [],
-                    kubernetes_version=kubernetes_version,
-                    error_messages=error_messages or [],
-                    symptom=symptom,
+                explanation = (
+                    self._relevance_explanation(candidate, query_analysis)
+                    if query_analysis is not None
+                    else self._raw_relevance_explanation(candidate)
                 )
                 candidate["relevance"] = explanation
                 if explanation["accepted"]:
                     provisionally_accepted.append(candidate)
+                elif explanation.get("cross_version_match"):
+                    cross_version.append(candidate)
                 else:
                     rejected.append(candidate)
             provisionally_accepted.sort(
@@ -295,6 +293,14 @@ class GraphRetriever:
                         )
                         rejected.append(candidate)
             matched = accepted[:accepted_limit]
+            cross_version.sort(
+                key=lambda item: (
+                    item["relevance"]["final_relevance_score"],
+                    item["relevance"]["vector_similarity"],
+                ),
+                reverse=True,
+            )
+            cross_version = cross_version[:accepted_limit]
 
             matched_keys = [
                 {
@@ -326,10 +332,18 @@ class GraphRetriever:
                 ]
 
         return {
-            "query": query,
+            "query": query_text,
+            "query_mode": (
+                "structured" if query_analysis is not None else "raw_query_only"
+            ),
             "matched_issues": matched,
             "related_issues": related,
             "no_close_match": not bool(matched),
+            **(
+                {"cross_version_matches": cross_version}
+                if query_analysis is not None
+                else {}
+            ),
             **(
                 {
                     "debug": {
@@ -364,18 +378,29 @@ class GraphRetriever:
             ),
         }
 
+    def retrieve(
+        self,
+        query: str,
+        limit: int = MAX_VECTOR_MATCHES,
+        *,
+        debug: bool = False,
+    ) -> dict[str, Any]:
+        """Backward-compatible raw-query-only search."""
+
+        return self.search(
+            query_text=query,
+            query_analysis=None,
+            limit=limit,
+            debug=debug,
+        )
+
     def _relevance_explanation(
         self,
         candidate: dict[str, Any],
-        *,
-        query: str,
-        components: list[str],
-        kubernetes_version: str | None,
-        error_messages: list[str],
-        symptom: str | None,
+        query_analysis: QueryAnalysis,
     ) -> dict[str, Any]:
         vector_similarity = float(candidate.get("score") or 0.0)
-        requested_components = self._value_map(components)
+        requested_components = self._value_map(query_analysis.components)
         candidate_components = self._value_map(candidate.get("components", []))
         component_keys = set(requested_components) & set(candidate_components)
         matching_components = sorted(
@@ -383,13 +408,13 @@ class GraphRetriever:
         )
         version_match_type, matching_versions, conflicting_versions = (
             self._compare_versions(
-                kubernetes_version,
+                query_analysis.kubernetes_version,
                 candidate.get("kubernetes_versions", []),
             )
         )
 
         query_critical_error_map = self._critical_error_map(
-            " ".join([query, symptom or "", *error_messages])
+            " ".join(query_analysis.error_messages)
         )
         query_critical_errors = set(query_critical_error_map)
         candidate_text = " ".join(
@@ -402,7 +427,7 @@ class GraphRetriever:
         candidate_critical_error_map = self._critical_error_map(candidate_text)
         candidate_critical_errors = set(candidate_critical_error_map)
         matching_critical_errors = query_critical_errors & candidate_critical_errors
-        requested_error_messages = self._value_map(error_messages)
+        requested_error_messages = self._value_map(query_analysis.error_messages)
         candidate_error_messages = self._value_map(
             candidate.get("error_messages", [])
         )
@@ -411,7 +436,7 @@ class GraphRetriever:
         )
 
         diagnostic_terms = self._distinctive_term_map(
-            " ".join([symptom or query, *error_messages])
+            query_analysis.symptom or ""
         )
         excluded_terms = set(query_critical_errors)
         excluded_terms.update(
@@ -458,8 +483,6 @@ class GraphRetriever:
             rejection_reasons.append("component_mismatch")
         if not (matching_error_terms or matching_symptom_terms):
             rejection_reasons.append("no_distinctive_symptom_overlap")
-        if explicit_version_conflict:
-            rejection_reasons.append("conflicting_kubernetes_version")
         final_score = min(
             1.0,
             vector_similarity * 0.65
@@ -475,7 +498,11 @@ class GraphRetriever:
         )
         if final_score < self._settings.retrieval_min_final_relevance_score:
             rejection_reasons.append("final_score_below_minimum")
-        accepted = not rejection_reasons
+        passes_non_version_rules = not rejection_reasons
+        cross_version_match = passes_non_version_rules and explicit_version_conflict
+        if explicit_version_conflict:
+            rejection_reasons.append("conflicting_kubernetes_version")
+        accepted = passes_non_version_rules and not explicit_version_conflict
         return {
             "vector_similarity": vector_similarity,
             "matching_components": matching_components,
@@ -487,6 +514,13 @@ class GraphRetriever:
             "version_conflict": explicit_version_conflict,
             "final_relevance_score": round(final_score, 6),
             "accepted": accepted,
+            "cross_version_match": cross_version_match,
+            "cross_version_explanation": (
+                "Similar symptom in another Kubernetes version; its resolution "
+                "must not be assumed to apply to the requested version."
+                if cross_version_match
+                else None
+            ),
             "accepted_by": (
                 "exceptional_vector"
                 if exceptional
@@ -495,6 +529,21 @@ class GraphRetriever:
                 else None
             ),
             "rejection_reasons": rejection_reasons,
+        }
+
+    def _raw_relevance_explanation(
+        self, candidate: dict[str, Any]
+    ) -> dict[str, Any]:
+        vector_similarity = float(candidate.get("score") or 0.0)
+        accepted = vector_similarity >= self._settings.retrieval_min_vector_score
+        return {
+            "vector_similarity": vector_similarity,
+            "final_relevance_score": round(vector_similarity, 6),
+            "accepted": accepted,
+            "accepted_by": "raw_vector_score" if accepted else None,
+            "rejection_reasons": (
+                [] if accepted else ["vector_score_below_minimum"]
+            ),
         }
 
     @staticmethod

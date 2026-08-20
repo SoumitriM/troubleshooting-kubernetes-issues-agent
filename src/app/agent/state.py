@@ -7,9 +7,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 Route = Literal["generate_fix", "generate_findings", "request_clarification"]
 
 
+class QueryAnalysis(BaseModel):
+    """Single validated handoff from incident analysis to GraphRAG."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symptom: str | None = None
+    components: list[str] = Field(default_factory=list)
+    kubernetes_version: str | None = None
+    error_messages: list[str] = Field(default_factory=list)
+    has_sufficient_details: bool
+    missing_details: list[str] = Field(default_factory=list)
+
+
 class IncidentState(TypedDict, total=False):
     user_query: str
     debug: bool
+    query_analysis: QueryAnalysis
     extracted_symptom: str | None
     extracted_components: list[str]
     kubernetes_version: str | None

@@ -3,7 +3,25 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.agent.nodes import AgentSettings, IncidentNodes
+from app.agent.state import QueryAnalysis
 from app.retrieval.graph_retriever import GraphRetriever
+
+
+def analysis(
+    *,
+    symptom: str | None = None,
+    components: list[str] | None = None,
+    kubernetes_version: str | None = None,
+    error_messages: list[str] | None = None,
+) -> QueryAnalysis:
+    return QueryAnalysis(
+        symptom=symptom,
+        components=components or [],
+        kubernetes_version=kubernetes_version,
+        error_messages=error_messages or [],
+        has_sufficient_details=True,
+        missing_details=[],
+    )
 
 
 def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None:
@@ -90,7 +108,11 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
     embedder = MagicMock()
     embedder.encode_query.return_value = [0.0] * 384
 
-    context = GraphRetriever(driver, embedder).retrieve("valid owners", 5)
+    context = GraphRetriever(driver, embedder).search(
+        query_text="valid owners",
+        query_analysis=analysis(symptom="valid owners"),
+        limit=5,
+    )
 
     assert context["query"] == "valid owners"
     assert context["matched_issues"][0]["score"] == 0.94
@@ -148,6 +170,8 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
         "version_conflict": False,
         "final_relevance_score": 0.761,
         "accepted": True,
+        "cross_version_match": False,
+        "cross_version_explanation": None,
         "accepted_by": "exceptional_vector",
         "rejection_reasons": [],
     }
@@ -168,6 +192,7 @@ def test_retrieve_caps_vector_matches_at_five() -> None:
 
     assert context == {
         "query": "query",
+        "query_mode": "raw_query_only",
         "matched_issues": [],
         "related_issues": [],
         "no_close_match": True,
@@ -290,12 +315,14 @@ def test_crashloopbackoff_excludes_unrelated_generic_kubelet_candidate() -> None
     embedder = MagicMock()
     embedder.encode_query.return_value = [0.0] * 384
 
-    context = GraphRetriever(driver, embedder).retrieve(
-        "Pods enter CrashLoopBackOff after kubelet restart on Kubernetes v1.35",
-        components=["kubelet"],
-        kubernetes_version="v1.35",
-        error_messages=["CrashLoopBackOff"],
-        symptom="Pods enter CrashLoopBackOff after kubelet restart",
+    context = GraphRetriever(driver, embedder).search(
+        query_text="Pods enter CrashLoopBackOff after kubelet restart on Kubernetes v1.35",
+        query_analysis=analysis(
+            components=["kubelet"],
+            kubernetes_version="v1.35",
+            error_messages=["CrashLoopBackOff"],
+            symptom="Pods enter CrashLoopBackOff after kubelet restart",
+        ),
         debug=True,
     )
 
@@ -346,12 +373,14 @@ def test_crashloopbackoff_returns_no_match_when_candidates_lack_exact_status() -
     embedder = MagicMock()
     embedder.encode_query.return_value = [0.0] * 384
 
-    context = GraphRetriever(driver, embedder).retrieve(
-        "Pods enter CrashLoopBackOff after kubelet restart on Kubernetes v1.35",
-        components=["kubelet"],
-        kubernetes_version="Kubernetes 1_35",
-        error_messages=["CrashLoopBackOff"],
-        symptom="Pods enter CrashLoopBackOff after kubelet restart",
+    context = GraphRetriever(driver, embedder).search(
+        query_text="Pods enter CrashLoopBackOff after kubelet restart on Kubernetes v1.35",
+        query_analysis=analysis(
+            components=["kubelet"],
+            kubernetes_version="Kubernetes 1_35",
+            error_messages=["CrashLoopBackOff"],
+            symptom="Pods enter CrashLoopBackOff after kubelet restart",
+        ),
         debug=True,
     )
 
@@ -362,6 +391,66 @@ def test_crashloopbackoff_returns_no_match_when_candidates_lack_exact_status() -
     assert "critical_error_mismatch" in context["debug"]["rejected_candidates"][0][
         "relevance"
     ]["rejection_reasons"]
+
+
+def test_structured_analysis_returns_strong_version_conflict_separately() -> None:
+    driver = MagicMock()
+    session = driver.session.return_value.__enter__.return_value
+    result = MagicMock()
+    result.data.return_value = [
+        {
+            "repository": "kubernetes/kubernetes",
+            "issue_number": 140743,
+            "title": "Kubelet reports CrashLoopBackOff after restart",
+            "summary": "A container enters CrashLoopBackOff after kubelet restart",
+            "url": "https://github.com/kubernetes/kubernetes/issues/140743",
+            "score": 0.82,
+            "components": ["kubelet"],
+            "kubernetes_versions": ["v1.29.15"],
+            "error_messages": ["CrashLoopBackOff"],
+        }
+    ]
+    session.run.return_value = result
+    embedder = MagicMock()
+    embedder.encode_query.return_value = [0.0] * 384
+    query_analysis = analysis(
+        symptom="Pods enter CrashLoopBackOff after the kubelet restarts",
+        components=["kubelet"],
+        kubernetes_version="v1.35",
+        error_messages=["CrashLoopBackOff"],
+    )
+
+    context = GraphRetriever(driver, embedder).search(
+        query_text=(
+            "Pods enter CrashLoopBackOff after the kubelet restarts on "
+            "Kubernetes v1.35"
+        ),
+        query_analysis=query_analysis,
+        debug=True,
+    )
+
+    assert context["query_mode"] == "structured"
+    assert context["matched_issues"] == []
+    assert context["related_issues"] == []
+    assert context["no_close_match"] is True
+    assert session.run.call_count == 1
+    assert [issue["issue_number"] for issue in context["cross_version_matches"]] == [
+        140743
+    ]
+    relevance = context["cross_version_matches"][0]["relevance"]
+    assert relevance["matching_components"] == ["kubelet"]
+    assert relevance["matching_error_terms"] == ["CrashLoopBackOff"]
+    assert "kubelet" not in [
+        term.lower() for term in relevance["matching_symptom_terms"]
+    ]
+    assert relevance["version_match_type"] == "conflict"
+    assert relevance["matching_versions"] == []
+    assert relevance["conflicting_versions"] == ["v1.29.15"]
+    assert relevance["version_conflict"] is True
+    assert relevance["accepted"] is False
+    assert relevance["cross_version_match"] is True
+    assert "another Kubernetes version" in relevance["cross_version_explanation"]
+    assert "conflicting_kubernetes_version" in relevance["rejection_reasons"]
 
 
 def test_exact_garbage_collector_query_accepts_issue_141382() -> None:
@@ -423,10 +512,12 @@ def test_exact_garbage_collector_query_accepts_issue_141382() -> None:
     embedder = MagicMock()
     embedder.encode_query.return_value = [0.0] * 384
 
-    context = GraphRetriever(driver, embedder).retrieve(
-        "garbage collector keeps processing objects with valid owners",
-        components=["garbage-collector"],
-        symptom="keeps processing objects with valid owners",
+    context = GraphRetriever(driver, embedder).search(
+        query_text="garbage collector keeps processing objects with valid owners",
+        query_analysis=analysis(
+            components=["garbage-collector"],
+            symptom="keeps processing objects with valid owners",
+        ),
     )
 
     assert [issue["issue_number"] for issue in context["matched_issues"]] == [
@@ -482,6 +573,13 @@ def test_relative_score_filter_does_not_fill_the_top_five() -> None:
     assert "outside_relative_score_window" in rejected[0]["relevance"][
         "rejection_reasons"
     ]
+    assert context["query_mode"] == "raw_query_only"
+    assert "cross_version_matches" not in context
+    for issue in context["matched_issues"]:
+        assert "matching_components" not in issue["relevance"]
+        assert "matching_versions" not in issue["relevance"]
+        assert "matching_error_terms" not in issue["relevance"]
+        assert "matching_symptom_terms" not in issue["relevance"]
 
 
 def test_graph_expansion_query_requires_strict_shared_context() -> None:
@@ -601,11 +699,7 @@ def test_matching_symptom_terms_preserve_candidate_spelling() -> None:
             "kubernetes_versions": [],
             "error_messages": [],
         },
-        query="objects remain processing",
-        components=[],
-        kubernetes_version=None,
-        error_messages=[],
-        symptom="objects remain processing",
+        analysis(symptom="objects remain processing"),
     )
 
     assert relevance["matching_symptom_terms"] == ["Objects", "PROCESSING", "remain"]
@@ -624,11 +718,12 @@ def test_error_and_symptom_matches_are_separate_and_restarts_is_generic() -> Non
 
     relevance = retriever._relevance_explanation(
         candidate,
-        query="CrashLoopBackOff during startup when kubelet restarts with timeout",
-        components=["kubelet"],
-        kubernetes_version="v1.35",
-        error_messages=["CrashLoopBackOff"],
-        symptom="startup timeout after kubelet restarts",
+        analysis(
+            components=["kubelet"],
+            kubernetes_version="v1.35",
+            error_messages=["CrashLoopBackOff"],
+            symptom="startup timeout after kubelet restarts",
+        ),
     )
 
     assert relevance["matching_error_terms"] == ["CrashLoopBackOff"]
@@ -649,11 +744,11 @@ def test_exact_structured_error_message_is_an_error_match_not_a_symptom() -> Non
             "kubernetes_versions": [],
             "error_messages": ["connection refused"],
         },
-        query="Image startup reports connection refused",
-        components=["kubelet"],
-        kubernetes_version=None,
-        error_messages=["connection refused"],
-        symptom="image startup",
+        analysis(
+            components=["kubelet"],
+            error_messages=["connection refused"],
+            symptom="image startup",
+        ),
     )
 
     assert relevance["matching_error_terms"] == ["connection refused"]

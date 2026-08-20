@@ -1,5 +1,13 @@
 import argparse
 import json
+import logging
+import os
+import sys
+from contextlib import redirect_stdout
+
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from neo4j import GraphDatabase
 
@@ -7,6 +15,25 @@ from app.graph.loader import GraphSettings
 from app.retrieval.embeddings import IssueEmbedder
 from app.retrieval.graph_retriever import GraphRetriever
 from app.retrieval.vector_store import IssueVectorStore
+
+
+class _HuggingFaceAuthenticationNoticeFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage().lower()
+        return not (
+            record.levelno == logging.WARNING
+            and "unauthenticated" in message
+            and any(
+                name in message
+                for name in ("hugging face", "huggingface", "hf hub")
+            )
+        )
+
+
+def _configure_cli_diagnostics() -> None:
+    notice_filter = _HuggingFaceAuthenticationNoticeFilter()
+    logging.getLogger("huggingface_hub").addFilter(notice_filter)
+    logging.getLogger("huggingface_hub.utils._http").addFilter(notice_filter)
 
 
 def positive_integer(value: str) -> int:
@@ -39,33 +66,37 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    settings = GraphSettings()
-    driver = GraphDatabase.driver(
-        settings.neo4j_uri,
-        auth=(
-            settings.neo4j_username,
-            settings.neo4j_password.get_secret_value(),
-        ),
-    )
-    try:
-        embedder = IssueEmbedder()
-        if args.command == "index":
-            store = IssueVectorStore(driver, embedder)
-            count = store.index_issues()
-            print(f"Indexed {count} changed issues")
-        elif args.command == "search":
-            store = IssueVectorStore(driver, embedder)
-            for result in store.search(args.query, args.limit):
-                print(json.dumps(result, ensure_ascii=False))
-        else:
-            context = GraphRetriever(driver, embedder).retrieve(
-                args.query,
-                args.limit,
-                debug=args.debug,
-            )
-            print(json.dumps(context, ensure_ascii=False))
-    finally:
-        driver.close()
+    _configure_cli_diagnostics()
+    with redirect_stdout(sys.stderr):
+        settings = GraphSettings()
+        driver = GraphDatabase.driver(
+            settings.neo4j_uri,
+            auth=(
+                settings.neo4j_username,
+                settings.neo4j_password.get_secret_value(),
+            ),
+        )
+        try:
+            embedder = IssueEmbedder()
+            if args.command == "index":
+                store = IssueVectorStore(driver, embedder)
+                output = {"indexed_changed_issues": store.index_issues()}
+            elif args.command == "search":
+                store = IssueVectorStore(driver, embedder)
+                output = {
+                    "query_mode": "raw_query_only",
+                    "results": store.search(args.query, args.limit),
+                }
+            else:
+                output = GraphRetriever(driver, embedder).search(
+                    query_text=args.query,
+                    query_analysis=None,
+                    limit=args.limit,
+                    debug=args.debug,
+                )
+        finally:
+            driver.close()
+    print(json.dumps(output, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -69,6 +69,19 @@ def _debug_output(result: dict, query: str, executed_nodes: list[str]) -> dict:
     retrieval_debug = context.get("debug", {})
     matched = context.get("matched_issues", [])
     related = context.get("related_issues", [])
+    query_analysis = result.get("query_analysis")
+    analysis_data = (
+        query_analysis.model_dump()
+        if hasattr(query_analysis, "model_dump")
+        else {
+            "symptom": result.get("extracted_symptom"),
+            "components": result.get("extracted_components", []),
+            "kubernetes_version": result.get("kubernetes_version"),
+            "error_messages": result.get("error_messages", []),
+            "has_sufficient_details": result.get("has_sufficient_details", False),
+            "missing_details": result.get("missing_details", []),
+        }
+    )
     reranking = [
         {
             "issue_number": detail.get("issue_number"),
@@ -82,6 +95,10 @@ def _debug_output(result: dict, query: str, executed_nodes: list[str]) -> dict:
             "version_conflict": detail.get("version_conflict", False),
             "final_score": detail.get("final_relevance_score"),
             "accepted": detail.get("accepted", False),
+            "cross_version_match": detail.get("cross_version_match", False),
+            "cross_version_explanation": detail.get(
+                "cross_version_explanation"
+            ),
             "rejection_reason": ", ".join(detail.get("rejection_reasons", []))
             or None,
         }
@@ -94,13 +111,7 @@ def _debug_output(result: dict, query: str, executed_nodes: list[str]) -> dict:
         "debug": {
             "original_user_query": query,
             "executed_nodes": executed_nodes,
-            "analyze_incident": {
-                "symptom": result.get("extracted_symptom"),
-                "components": result.get("extracted_components", []),
-                "kubernetes_version": result.get("kubernetes_version"),
-                "error_messages": result.get("error_messages", []),
-                "has_sufficient_details": result.get("has_sufficient_details", False),
-            },
+            "analyze_incident": analysis_data,
             "vector_candidates_before_reranking": retrieval_debug.get(
                 "vector_candidates", []
             ),
@@ -122,6 +133,22 @@ def _debug_output(result: dict, query: str, executed_nodes: list[str]) -> dict:
                     "shared_versions": issue.get("shared_versions", []),
                 }
                 for issue in related
+            ],
+            "cross_version_matches": [
+                {
+                    "issue_number": issue.get("issue_number"),
+                    "candidate_versions": issue.get("kubernetes_versions", []),
+                    "conflicting_versions": (issue.get("relevance") or {}).get(
+                        "conflicting_versions", []
+                    ),
+                    "final_score": (issue.get("relevance") or {}).get(
+                        "final_relevance_score"
+                    ),
+                    "explanation": (issue.get("relevance") or {}).get(
+                        "cross_version_explanation"
+                    ),
+                }
+                for issue in context.get("cross_version_matches", [])
             ],
             "evidence_assessment": {
                 "top_similarity_score": result.get("top_similarity_score"),

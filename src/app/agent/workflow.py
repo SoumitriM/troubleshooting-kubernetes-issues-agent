@@ -46,6 +46,6 @@ def route_after_assessment(state: IncidentState) -> Route:
 def route_after_analysis(state: IncidentState) -> str:
     return (
         "retrieve_evidence"
-        if state.get("has_sufficient_details")
+        if state["query_analysis"].has_sufficient_details
         else "request_clarification"
     )

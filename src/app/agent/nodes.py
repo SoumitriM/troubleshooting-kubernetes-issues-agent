@@ -4,7 +4,7 @@ from typing import Any
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.agent.state import IncidentState, Route
+from app.agent.state import IncidentState, QueryAnalysis, Route
 from app.enrichment.fh_genie_client import FHGenieClient
 from app.retrieval.graph_retriever import GraphRetriever
 
@@ -65,26 +65,31 @@ class IncidentNodes:
             missing_details.append("Kubernetes version")
         if not re.search(r"\b(log|logs|stack trace|traceback)\b", state["user_query"], re.I):
             missing_details.append("relevant logs")
+        analysis = QueryAnalysis(
+            symptom=symptom if specific_symptom else None,
+            components=facts.components,
+            kubernetes_version=version,
+            error_messages=error_messages,
+            has_sufficient_details=has_sufficient_details,
+            missing_details=missing_details,
+        )
         return {
-            "extracted_symptom": symptom if specific_symptom else None,
-            "extracted_components": facts.components,
-            "kubernetes_version": version,
-            "error_messages": error_messages,
-            "has_sufficient_details": has_sufficient_details,
-            "missing_details": missing_details,
+            "query_analysis": analysis,
+            "extracted_symptom": analysis.symptom,
+            "extracted_components": analysis.components,
+            "kubernetes_version": analysis.kubernetes_version,
+            "error_messages": analysis.error_messages,
+            "has_sufficient_details": analysis.has_sufficient_details,
+            "missing_details": analysis.missing_details,
         }
 
     def retrieve_evidence(self, state: IncidentState) -> dict[str, Any]:
-        retrieval_options: dict[str, Any] = {
-            "components": state.get("extracted_components", []),
-            "kubernetes_version": state.get("kubernetes_version"),
-            "error_messages": state.get("error_messages", []),
-            "symptom": state.get("extracted_symptom"),
-        }
-        if state.get("debug"):
-            retrieval_options["debug"] = True
-        context = self._retriever.retrieve(
-            state["user_query"], 5, **retrieval_options
+        analysis = state["query_analysis"]
+        context = self._retriever.search(
+            query_text=state["user_query"],
+            query_analysis=analysis,
+            limit=5,
+            debug=bool(state.get("debug")),
         )
         scores = [
             float(issue["score"])
@@ -196,8 +201,20 @@ class IncidentNodes:
         acknowledgement = (
             "I already have " + "; ".join(known) + ". " if known else ""
         )
+        cross_version_notice = ""
+        if state.get("retrieved_context", {}).get("cross_version_matches"):
+            cross_version_notice = (
+                "A similar symptom exists in another Kubernetes version, but its "
+                "resolution must not be assumed to apply to your version. "
+            )
         return {
-            "answer": acknowledgement + prefix + ", ".join(missing) + ".",
+            "answer": (
+                acknowledgement
+                + cross_version_notice
+                + prefix
+                + ", ".join(missing)
+                + "."
+            ),
             "citations": [],
             "route": "request_clarification",
             "route_reason": state.get(

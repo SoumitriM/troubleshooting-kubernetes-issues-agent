@@ -190,6 +190,7 @@ def test_agent_cli_debug_streams_sanitized_execution_trace(
         "kubernetes_version": "v1.35",
         "error_messages": ["CrashLoopBackOff"],
         "has_sufficient_details": True,
+        "missing_details": [],
     }
     assert output["debug"]["vector_candidates_before_reranking"][1] == {
         "issue_number": 999,

@@ -256,6 +256,12 @@ python -m app.retrieval.cli graph-search \
   --debug
 ```
 
+The standalone retrieval CLI operates in `raw_query_only` mode because it has
+no incident-analysis stage. Its JSON explicitly reports that mode and exposes
+vector scores only—not component, version, error, or symptom matching fields.
+Both Hugging Face and Transformers progress bars are disabled before model
+initialization; stdout remains JSON and genuine errors remain on stderr.
+
 Configure reranking with `RETRIEVAL_MIN_VECTOR_SCORE`,
 `RETRIEVAL_EXCEPTIONAL_VECTOR_SCORE`, and
 `RETRIEVAL_MIN_FINAL_RELEVANCE_SCORE`, and
@@ -317,6 +323,11 @@ version, and error messages. A deterministic clarification gate prevents vague
 reports such as “Kubernetes is not working” from reaching Neo4j at all. Detailed
 reports proceed to GraphRAG retrieval, where results must satisfy both the
 configured similarity threshold and a semantic, component, or version overlap.
+Those extracted fields are validated once as a shared `QueryAnalysis` object and
+passed intact to GraphRAG with the original query text. The reranker uses only
+`QueryAnalysis.components` for components, `kubernetes_version` for version
+comparison, `error_messages` for errors, and `symptom` for symptom terms; it does
+not rediscover structured fields from raw query tokens.
 Error-state matches and symptom-term matches are reported separately. A
 lightweight, rule-based Snowball stemmer compares ordinary symptom words with a
 generic denylist, so restart, fail, work, and break inflections do not count as
@@ -326,6 +337,10 @@ their original spelling is retained in diagnostics. Version diagnostics
 distinguish `exact`, `compatible_minor`,
 `conflict`, and `unknown`; for example, `v1.35.x` is compatible with `v1.35`
 but is not labeled exact.
+Strong symptom/error/component matches from an explicitly conflicting version
+are returned separately as `cross_version_matches`. They are not direct matches,
+do not seed graph expansion, and their resolutions are never treated as applying
+to the requested Kubernetes version.
 Routing is deterministic:
 
 - `generate_fix` is used only when similarity is sufficient and GraphRAG
