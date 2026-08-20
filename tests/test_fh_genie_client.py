@@ -149,3 +149,82 @@ def test_extract_resolution_rejects_invented_evidence_url() -> None:
         match="response contains unsupported evidence URL"):
         FHGenieClient(settings(), client=api).extract_resolution(resolution_issue())
     assert api.chat.completions.create.call_count == 2
+
+
+def test_generate_grounded_fix_accepts_only_supplied_steps_and_citations() -> None:
+    api = MagicMock()
+    evidence_url = "https://github.com/example/project/pull/1"
+    api.chat.completions.create.return_value = response(
+        '{"answer":"Admission policy required",'
+        '"verified_steps":["Enable the admission policy"],'
+        f'"citations":["{evidence_url}"]}}'
+    )
+
+    answer = FHGenieClient(settings(), client=api).generate_grounded_fix(
+        "How do I fix this?",
+        [
+            {
+                "resolution_type": "configuration",
+                "resolution_summary": "Admission policy required",
+                "verified_steps": ["Enable the admission policy"],
+                "evidence_urls": [evidence_url],
+            }
+        ],
+    )
+
+    assert answer.verified_steps == ["Enable the admission policy"]
+    assert answer.citations == [evidence_url]
+
+
+def test_generate_grounded_fix_retries_and_rejects_invented_step() -> None:
+    api = MagicMock()
+    api.chat.completions.create.return_value = response(
+        '{"answer":"Fixed",'
+        '"verified_steps":["kubectl invented-command"],'
+        '"citations":["https://github.com/example/project/pull/1"]}'
+    )
+
+    with pytest.raises(
+        EnrichmentResponseError,
+        match="response contains unsupported fix step",
+    ):
+        FHGenieClient(settings(), client=api).generate_grounded_fix(
+            "How do I fix this?",
+            [
+                {
+                    "resolution_type": "fixed",
+                    "resolution_summary": "Fixed",
+                    "verified_steps": ["Apply patch 1"],
+                    "evidence_urls": ["https://github.com/example/project/pull/1"],
+                }
+            ],
+        )
+
+    assert api.chat.completions.create.call_count == 2
+
+
+def test_generate_grounded_fix_rejects_invented_summary() -> None:
+    api = MagicMock()
+    api.chat.completions.create.return_value = response(
+        '{"answer":"Invented root cause and fix",'
+        '"verified_steps":["Apply patch 1"],'
+        '"citations":["https://github.com/example/project/pull/1"]}'
+    )
+
+    with pytest.raises(
+        EnrichmentResponseError,
+        match="response contains unsupported fix summary",
+    ):
+        FHGenieClient(settings(), client=api).generate_grounded_fix(
+            "How do I fix this?",
+            [
+                {
+                    "resolution_type": "fixed",
+                    "resolution_summary": "Verified fix summary",
+                    "verified_steps": ["Apply patch 1"],
+                    "evidence_urls": ["https://github.com/example/project/pull/1"],
+                }
+            ],
+        )
+
+    assert api.chat.completions.create.call_count == 2

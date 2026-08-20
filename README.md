@@ -256,11 +256,40 @@ cause, summary, confidence, and supporting evidence URLs. A separate
 `closed_without_fix` is retained as disposition context but never offered as a
 solution.
 
+## Evidence-grounded incident assistant
+
+Run the LangGraph incident assistant with a natural-language report:
+
+```bash
+python -m app.agent.cli \
+  --query "Non-admin users can enable DRA adminAccess by labeling their namespace"
+```
+
+The workflow first uses FH Genie to extract the symptom, components, and
+Kubernetes version, then retrieves GraphRAG evidence. Routing is deterministic:
+
+- `generate_fix` is used only when similarity is sufficient and GraphRAG
+  provides a verified actionable `fixed` or `configuration` resolution with
+  exact steps and evidence URLs.
+- `generate_findings` summarizes relevant incidents and components while
+  explicitly stating that no verified actionable fix was found.
+- `request_clarification` asks for missing version, component, logs, or error
+  details when retrieval is insufficient.
+
+FH Genie selects an actionable resolution, but its answer summary, steps, and
+citations must exactly match retrieved evidence. Unsupported summaries,
+commands, steps, and URLs are rejected. `closed_without_fix`, duplicate,
+non-reproducible, and unknown
+dispositions are never treated as fixes. Configure deterministic routing with
+`AGENT_RELEVANCE_THRESHOLD` and `AGENT_ACTIONABLE_FIX_THRESHOLD`; both values
+must be between 0 and 1.
+
 ## Project structure
 
 ```text
 .
 ├── src/app/          # FastAPI application package
+│   ├── agent/        # LangGraph evidence-grounded incident assistant
 │   ├── graph/        # Neo4j graph loader and CLI
 │   ├── enrichment/   # FH Genie client, models, and JSONL CLI
 │   ├── ingestion/    # GitHub issue and resolution-evidence ingestion
