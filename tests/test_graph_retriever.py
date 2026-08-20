@@ -140,9 +140,10 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
         "matching_components": [],
         "matching_versions": [],
         "matching_error_terms": ["owners", "valid"],
-        "final_relevance_score": 0.858,
+        "final_relevance_score": 0.761,
         "accepted": True,
         "accepted_by": "exceptional_vector",
+        "rejection_reasons": [],
     }
     assert "size(shared_components) >= 2" in expansion_call.args[0]
     assert "size(shared_versions) >= 1" in expansion_call.args[0]
@@ -159,7 +160,12 @@ def test_retrieve_caps_vector_matches_at_five() -> None:
 
     context = GraphRetriever(driver, embedder).retrieve("query", 100)
 
-    assert context == {"query": "query", "matched_issues": [], "related_issues": []}
+    assert context == {
+        "query": "query",
+        "matched_issues": [],
+        "related_issues": [],
+        "no_close_match": True,
+    }
     assert session.run.call_args.kwargs["vector_limit"] == 20
     assert session.run.call_count == 1
 
@@ -172,6 +178,8 @@ def test_retrieve_skips_expansion_without_components_or_versions() -> None:
         {
             "repository": "kubernetes/kubernetes",
             "issue_number": 10,
+            "title": "Distinctive diagnostic signature",
+            "summary": "Distinctive diagnostic signature was observed",
             "components": [],
             "kubernetes_versions": [],
             "score": 0.9,
@@ -181,7 +189,9 @@ def test_retrieve_skips_expansion_without_components_or_versions() -> None:
     embedder = MagicMock()
     embedder.encode_query.return_value = [0.0] * 384
 
-    context = GraphRetriever(driver, embedder).retrieve("query")
+    context = GraphRetriever(driver, embedder).retrieve(
+        "distinctive diagnostic signature"
+    )
 
     assert len(context["matched_issues"]) == 1
     assert context["related_issues"] == []
@@ -224,7 +234,7 @@ def test_issue_141293_is_disposition_context_not_an_actionable_solution() -> Non
     embedder = MagicMock()
     embedder.encode_query.return_value = [0.0] * 384
 
-    context = GraphRetriever(driver, embedder).retrieve("possible solution")
+    context = GraphRetriever(driver, embedder).retrieve("closed without code fix")
 
     issue = context["matched_issues"][0]
     assert issue["issue_number"] == 141293
@@ -289,7 +299,6 @@ def test_crashloopbackoff_excludes_unrelated_generic_kubelet_candidate() -> None
     ]
     assert context["matched_issues"][0]["relevance"]["matching_error_terms"] == [
         "crashloopbackoff",
-        "restart",
     ]
     assert context["debug"]["rejected_candidates"][0]["issue_number"] == 500
     returned_urls = {
@@ -310,6 +319,45 @@ def test_crashloopbackoff_excludes_unrelated_generic_kubelet_candidate() -> None
     ]
 
 
+def test_crashloopbackoff_returns_no_match_when_candidates_lack_exact_status() -> None:
+    driver = MagicMock()
+    session = driver.session.return_value.__enter__.return_value
+    result = MagicMock()
+    result.data.return_value = [
+        {
+            "repository": "kubernetes/kubernetes",
+            "issue_number": 500,
+            "title": "Kubelet restarts pods",
+            "summary": "Pods restart during node maintenance",
+            "url": "https://github.com/kubernetes/kubernetes/issues/500",
+            "score": 0.96,
+            "components": ["kubelet"],
+            "kubernetes_versions": ["v1.35"],
+            "error_messages": [],
+        }
+    ]
+    session.run.return_value = result
+    embedder = MagicMock()
+    embedder.encode_query.return_value = [0.0] * 384
+
+    context = GraphRetriever(driver, embedder).retrieve(
+        "Pods enter CrashLoopBackOff after kubelet restart on Kubernetes v1.35",
+        components=["kubelet"],
+        kubernetes_version="Kubernetes 1_35",
+        error_messages=["CrashLoopBackOff"],
+        symptom="Pods enter CrashLoopBackOff after kubelet restart",
+        debug=True,
+    )
+
+    assert context["matched_issues"] == []
+    assert context["related_issues"] == []
+    assert context["no_close_match"] is True
+    assert session.run.call_count == 1
+    assert "critical_error_mismatch" in context["debug"]["rejected_candidates"][0][
+        "relevance"
+    ]["rejection_reasons"]
+
+
 def test_exact_garbage_collector_query_accepts_issue_141382() -> None:
     driver = MagicMock()
     session = driver.session.return_value.__enter__.return_value
@@ -328,7 +376,40 @@ def test_exact_garbage_collector_query_accepts_issue_141382() -> None:
             "error_messages": [],
             "verified_disposition": None,
             "actionable_fix": None,
-        }
+        },
+        {
+            "repository": "kubernetes/kubernetes",
+            "issue_number": 700,
+            "title": "Kubelet restart handling",
+            "summary": "Node service restarts are delayed",
+            "url": "https://github.com/kubernetes/kubernetes/issues/700",
+            "score": 0.88,
+            "components": ["kubelet"],
+            "kubernetes_versions": [],
+            "error_messages": [],
+        },
+        {
+            "repository": "kubernetes/kubernetes",
+            "issue_number": 701,
+            "title": "DRA admin access",
+            "summary": "Namespace labels enable admin access",
+            "url": "https://github.com/kubernetes/kubernetes/issues/701",
+            "score": 0.86,
+            "components": ["DRA"],
+            "kubernetes_versions": [],
+            "error_messages": [],
+        },
+        {
+            "repository": "kubernetes/kubernetes",
+            "issue_number": 702,
+            "title": "Controller-manager leader election",
+            "summary": "Leader election lease is renewed",
+            "url": "https://github.com/kubernetes/kubernetes/issues/702",
+            "score": 0.84,
+            "components": ["controller-manager"],
+            "kubernetes_versions": [],
+            "error_messages": [],
+        },
     ]
     related_result = MagicMock()
     related_result.data.return_value = []
@@ -338,7 +419,7 @@ def test_exact_garbage_collector_query_accepts_issue_141382() -> None:
 
     context = GraphRetriever(driver, embedder).retrieve(
         "garbage collector keeps processing objects with valid owners",
-        components=["garbage collector"],
+        components=["garbage-collector"],
         symptom="keeps processing objects with valid owners",
     )
 
@@ -348,6 +429,53 @@ def test_exact_garbage_collector_query_accepts_issue_141382() -> None:
     relevance = context["matched_issues"][0]["relevance"]
     assert relevance["matching_components"] == ["garbage collector"]
     assert relevance["accepted_by"] == "vector_plus_diagnostic_overlap"
+    assert context["no_close_match"] is False
+    assert len(context["matched_issues"]) == 1
+
+
+def test_relative_score_filter_does_not_fill_the_top_five() -> None:
+    driver = MagicMock()
+    session = driver.session.return_value.__enter__.return_value
+    candidate_result = MagicMock()
+    candidate_result.data.return_value = [
+        {
+            "repository": "kubernetes/kubernetes",
+            "issue_number": 1,
+            "title": "Distinctive allocator exhaustion",
+            "summary": "Allocator exhaustion blocks allocation",
+            "url": "https://github.com/kubernetes/kubernetes/issues/1",
+            "score": 0.90,
+            "components": [],
+            "kubernetes_versions": [],
+            "error_messages": [],
+        },
+        {
+            "repository": "kubernetes/kubernetes",
+            "issue_number": 2,
+            "title": "Allocator exhaustion",
+            "summary": "Allocator exhaustion appears in a different path",
+            "url": "https://github.com/kubernetes/kubernetes/issues/2",
+            "score": 0.65,
+            "components": [],
+            "kubernetes_versions": [],
+            "error_messages": [],
+        },
+    ]
+    session.run.return_value = candidate_result
+    embedder = MagicMock()
+    embedder.encode_query.return_value = [0.0] * 384
+
+    context = GraphRetriever(driver, embedder).retrieve(
+        "distinctive allocator exhaustion",
+        debug=True,
+    )
+
+    assert [issue["issue_number"] for issue in context["matched_issues"]] == [1]
+    rejected = context["debug"]["rejected_candidates"]
+    assert rejected[0]["issue_number"] == 2
+    assert "outside_relative_score_window" in rejected[0]["relevance"][
+        "rejection_reasons"
+    ]
 
 
 def test_graph_expansion_query_requires_strict_shared_context() -> None:

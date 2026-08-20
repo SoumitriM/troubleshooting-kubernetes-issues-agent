@@ -239,9 +239,15 @@ the model files.
 GraphRAG fetches a larger vector candidate pool internally and accepts at most
 five direct matches after deterministic reranking by vector similarity, exact
 components and Kubernetes versions, and distinctive error or symptom terms.
-Every accepted match includes a `relevance` explanation. Generic component
-overlap alone does not make a result a direct semantic match. To inspect rejected
-candidates and their scores, add `--debug` to `graph-search`:
+Comparison is lowercase and whitespace-trimmed; hyphens, underscores, and
+spaces are equivalent, while original values are retained for display. A
+distinctive status such as `CrashLoopBackOff` must occur in both the query and
+candidate, explicit version conflicts are rejected, and component overlap alone
+is insufficient without a distinctive symptom match. Every accepted match
+includes a `relevance` explanation. Results outside the configured score window
+relative to the best qualifying match are removed rather than used to fill five
+positions. To inspect rejected candidates, scores, and rejection reasons, add
+`--debug` to `graph-search`:
 
 ```bash
 python -m app.retrieval.cli graph-search \
@@ -252,9 +258,11 @@ python -m app.retrieval.cli graph-search \
 
 Configure reranking with `RETRIEVAL_MIN_VECTOR_SCORE`,
 `RETRIEVAL_EXCEPTIONAL_VECTOR_SCORE`, and
-`RETRIEVAL_MIN_FINAL_RELEVANCE_SCORE`. Graph expansion starts only from accepted
+`RETRIEVAL_MIN_FINAL_RELEVANCE_SCORE`, and
+`RETRIEVAL_MIN_RELATIVE_SCORE_RATIO`. Graph expansion starts only from accepted
 direct matches, returns at most three related issues, and requires either two
-shared components or a shared component plus the same version.
+shared components or a shared component plus the same version. With no accepted
+direct match, the context sets `no_close_match` and skips graph expansion.
 
 For a GraphRAG-style context object, expand the five closest vector matches
 through their components, Kubernetes versions, labels, and error messages:
@@ -267,8 +275,9 @@ python -m app.retrieval.cli graph-search \
 
 The result is one JSON object containing the query, deduplicated vector-matched
 issues with similarity scores and graph metadata, and up to three additional
-issues sharing a component or Kubernetes version. This retrieval step is
-bounded and does not call FH Genie or another language model. When available,
+issues satisfying the stricter shared-component/version expansion rules. This
+retrieval step is bounded and does not call FH Genie or another language model.
+When available,
 matched and related issues include `verified_disposition` with its type, root
 cause, summary, confidence, and supporting evidence URLs. A separate
 `actionable_fix` object is returned only for supported `fixed` or
@@ -299,7 +308,12 @@ Routing is deterministic:
   explicitly stating that no verified actionable fix was found. Direct vector
   matches and graph-expanded related issues are shown in separate sections.
 - `request_clarification` asks for missing version, component, logs, or error
-  details when retrieval is insufficient.
+  details when retrieval is insufficient. If reranking found no accepted direct
+  match, it explicitly says no close historical incident was found.
+
+Findings cite only the issue pages whose details appear in the answer.
+Resolution evidence URLs are cited only when `generate_fix` actually uses that
+verified resolution.
 
 FH Genie selects an actionable resolution, but its answer summary, steps, and
 citations must exactly match retrieved evidence. Unsupported summaries,

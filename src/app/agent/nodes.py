@@ -121,6 +121,10 @@ class IncidentNodes:
         }
         if route == "request_clarification":
             missing = list(state.get("missing_details", []))
+            if context.get("no_close_match"):
+                missing = self._unique(
+                    [*missing, "relevant logs", "an exact error message"]
+                )
             if not missing:
                 missing = ["additional logs or an exact error message"]
             result["missing_details"] = missing
@@ -164,10 +168,13 @@ class IncidentNodes:
 
     def request_clarification(self, state: IncidentState) -> dict[str, Any]:
         missing = state.get("missing_details", [])
+        prefix = (
+            "No close historical incident was found. Please provide: "
+            if state.get("retrieved_context", {}).get("no_close_match")
+            else "Please provide: "
+        )
         return {
-            "answer": "Please provide: "
-            + ", ".join(self._unique(missing))
-            + ".",
+            "answer": prefix + ", ".join(self._unique(missing)) + ".",
             "citations": [],
             "route": "request_clarification",
             "actionable_fix_available": False,
@@ -278,10 +285,9 @@ class IncidentNodes:
 
     @staticmethod
     def _finding_urls(issue: dict[str, Any]) -> list[str]:
-        urls = [issue.get("url")]
-        disposition = issue.get("verified_disposition") or {}
-        urls.extend(disposition.get("evidence_urls", []))
-        return [url for url in urls if url]
+        # Findings describe the issue itself, not its resolution evidence. Resolution
+        # URLs are cited only by generate_fix when the answer actually uses that fix.
+        return [issue["url"]] if issue.get("url") else []
 
     @staticmethod
     def _unique(values: Any) -> list[str]:

@@ -178,6 +178,34 @@ def test_generate_findings_route_never_offers_closed_without_fix() -> None:
     assert retriever.calls == 1
 
 
+def test_findings_do_not_cite_unused_resolution_evidence() -> None:
+    issue = matched_issue(0.88, actionable=False, resolution_type="closed_without_fix")
+    issue["verified_disposition"]["evidence_urls"] = [
+        "https://github.com/kubernetes/kubernetes/issues/1#issuecomment-unused"
+    ]
+
+    result, _fh_genie, _retriever = run_workflow(
+        {"matched_issues": [issue], "related_issues": []}
+    )
+
+    assert result["route"] == "generate_findings"
+    assert result["citations"] == [
+        "https://github.com/kubernetes/kubernetes/issues/1"
+    ]
+
+
+def test_no_close_match_requests_logs_and_reports_no_historical_match() -> None:
+    result, _fh_genie, retriever = run_workflow(
+        {"matched_issues": [], "related_issues": [], "no_close_match": True}
+    )
+
+    assert result["route"] == "request_clarification"
+    assert "No close historical incident was found" in result["answer"]
+    assert "logs" in result["answer"]
+    assert result["citations"] == []
+    assert retriever.calls == 1
+
+
 def test_request_clarification_route_for_low_similarity() -> None:
     context = {"matched_issues": [matched_issue(0.2, actionable=True)], "related_issues": []}
 

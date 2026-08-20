@@ -17,6 +17,7 @@ class GraphRetrieverSettings(BaseSettings):
     retrieval_min_vector_score: float = Field(default=0.55, ge=0.0, le=1.0)
     retrieval_exceptional_vector_score: float = Field(default=0.90, ge=0.0, le=1.0)
     retrieval_min_final_relevance_score: float = Field(default=0.55, ge=0.0, le=1.0)
+    retrieval_min_relative_score_ratio: float = Field(default=0.85, ge=0.0, le=1.0)
 
 
 class GraphRetriever:
@@ -25,32 +26,37 @@ class GraphRetriever:
     MAX_VECTOR_MATCHES = 5
     MIN_CANDIDATE_POOL = 20
     EXPANSION_LIMIT = 3
-    GENERIC_COMPONENTS = {
-        "api",
-        "kubelet",
-        "kubernetes",
-        "node",
-        "pod",
-        "pods",
-    }
     TERM_STOP_WORDS = {
         "after",
         "and",
         "are",
         "can",
         "error",
+        "failed",
+        "failure",
         "enter",
         "for",
         "from",
         "into",
         "issue",
         "kubernetes",
+        "pod",
+        "pods",
+        "problem",
+        "restart",
         "not",
         "that",
         "the",
         "this",
         "with",
+        "working",
     }
+    KNOWN_CRITICAL_ERRORS = {
+        "crashloopbackoff",
+        "imagepullbackoff",
+        "oomkilled",
+    }
+    GENERIC_ERRORS = {"broken", "error", "failed", "failure", "problem"}
 
     MATCHED_ISSUES_QUERY = f"""
     CALL db.index.vector.queryNodes(
@@ -238,7 +244,7 @@ class GraphRetriever:
                     vector_limit=vector_limit,
                 ).data()
             ]
-            accepted: list[dict[str, Any]] = []
+            provisionally_accepted: list[dict[str, Any]] = []
             rejected: list[dict[str, Any]] = []
             for candidate in candidates:
                 explanation = self._relevance_explanation(
@@ -251,16 +257,34 @@ class GraphRetriever:
                 )
                 candidate["relevance"] = explanation
                 if explanation["accepted"]:
-                    accepted.append(candidate)
+                    provisionally_accepted.append(candidate)
                 else:
                     rejected.append(candidate)
-            accepted.sort(
+            provisionally_accepted.sort(
                 key=lambda item: (
                     item["relevance"]["final_relevance_score"],
                     item["relevance"]["vector_similarity"],
                 ),
                 reverse=True,
             )
+            accepted: list[dict[str, Any]] = []
+            if provisionally_accepted:
+                best_score = provisionally_accepted[0]["relevance"][
+                    "final_relevance_score"
+                ]
+                relative_cutoff = (
+                    best_score * self._settings.retrieval_min_relative_score_ratio
+                )
+                for candidate in provisionally_accepted:
+                    if candidate["relevance"]["final_relevance_score"] >= relative_cutoff:
+                        accepted.append(candidate)
+                    else:
+                        candidate["relevance"]["accepted"] = False
+                        candidate["relevance"]["accepted_by"] = None
+                        candidate["relevance"]["rejection_reasons"].append(
+                            "outside_relative_score_window"
+                        )
+                        rejected.append(candidate)
             matched = accepted[:accepted_limit]
 
             matched_keys = [
@@ -296,6 +320,7 @@ class GraphRetriever:
             "query": query,
             "matched_issues": matched,
             "related_issues": related,
+            "no_close_match": not bool(matched),
             **(
                 {
                     "debug": {
@@ -327,55 +352,68 @@ class GraphRetriever:
         symptom: str | None,
     ) -> dict[str, Any]:
         vector_similarity = float(candidate.get("score") or 0.0)
-        requested_components = self._normalized_values(components)
-        candidate_components = self._normalized_values(
-            candidate.get("components", [])
-        )
-        matching_components = sorted(requested_components & candidate_components)
-        requested_versions = self._normalized_values(
+        requested_components = self._value_map(components)
+        candidate_components = self._value_map(candidate.get("components", []))
+        component_keys = set(requested_components) & set(candidate_components)
+        matching_components = sorted(candidate_components[key] for key in component_keys)
+        requested_versions = self._version_map(
             [kubernetes_version] if kubernetes_version else []
         )
-        candidate_versions = self._normalized_values(
-            candidate.get("kubernetes_versions", [])
-        )
-        matching_versions = sorted(requested_versions & candidate_versions)
-        diagnostic_terms = self._distinctive_terms(
+        candidate_versions = self._version_map(candidate.get("kubernetes_versions", []))
+        version_keys = set(requested_versions) & set(candidate_versions)
+        matching_versions = sorted(candidate_versions[key] for key in version_keys)
+
+        query_critical_errors = self._critical_errors(
             " ".join([query, symptom or "", *error_messages])
         )
-        diagnostic_terms -= requested_components | self.GENERIC_COMPONENTS
+        candidate_text = " ".join(
+            [
+                str(candidate.get("title") or ""),
+                str(candidate.get("summary") or ""),
+                *candidate.get("error_messages", []),
+            ]
+        )
+        candidate_critical_errors = self._critical_errors(candidate_text)
+        matching_critical_errors = query_critical_errors & candidate_critical_errors
+
+        diagnostic_terms = self._distinctive_terms(" ".join([symptom or query, *error_messages]))
+        component_terms = {
+            term
+            for component in requested_components
+            for term in component.split()
+        }
+        diagnostic_terms -= component_terms
         candidate_terms = self._distinctive_terms(
-            " ".join(
-                [
-                    str(candidate.get("title") or ""),
-                    str(candidate.get("summary") or ""),
-                    *candidate.get("error_messages", []),
-                ]
-            )
+            candidate_text
         )
-        matching_error_terms = sorted(diagnostic_terms & candidate_terms)
-        meaningful_components = [
-            component
-            for component in matching_components
-            if component not in self.GENERIC_COMPONENTS
-        ]
-        has_meaningful_signal = bool(
-            meaningful_components or matching_versions or matching_error_terms
+        matching_error_terms = sorted(
+            (diagnostic_terms & candidate_terms) | matching_critical_errors
         )
+        explicit_version_conflict = bool(
+            requested_versions and candidate_versions and not version_keys
+        )
+        exceptional = vector_similarity >= self._settings.retrieval_exceptional_vector_score
+        rejection_reasons: list[str] = []
+        if vector_similarity < self._settings.retrieval_min_vector_score:
+            rejection_reasons.append("vector_score_below_minimum")
+        if query_critical_errors and not matching_critical_errors:
+            rejection_reasons.append("critical_error_mismatch")
+        if requested_components and not component_keys and not exceptional:
+            rejection_reasons.append("component_mismatch")
+        if not matching_error_terms:
+            rejection_reasons.append("no_distinctive_symptom_overlap")
+        if explicit_version_conflict:
+            rejection_reasons.append("conflicting_kubernetes_version")
         final_score = min(
             1.0,
-            vector_similarity * 0.70
-            + (0.10 if meaningful_components else 0.0)
+            vector_similarity * 0.65
+            + (0.10 if matching_components else 0.0)
             + (0.10 if matching_versions else 0.0)
-            + (0.20 if matching_error_terms else 0.0),
+            + (0.15 if matching_error_terms else 0.0),
         )
-        exceptional = (
-            vector_similarity >= self._settings.retrieval_exceptional_vector_score
-        )
-        accepted = exceptional or (
-            vector_similarity >= self._settings.retrieval_min_vector_score
-            and has_meaningful_signal
-            and final_score >= self._settings.retrieval_min_final_relevance_score
-        )
+        if final_score < self._settings.retrieval_min_final_relevance_score:
+            rejection_reasons.append("final_score_below_minimum")
+        accepted = not rejection_reasons
         return {
             "vector_similarity": vector_similarity,
             "matching_components": matching_components,
@@ -390,11 +428,51 @@ class GraphRetriever:
                 if accepted
                 else None
             ),
+            "rejection_reasons": rejection_reasons,
         }
 
     @staticmethod
-    def _normalized_values(values: list[str]) -> set[str]:
-        return {value.strip().lower() for value in values if value and value.strip()}
+    def _normalize_phrase(value: str) -> str:
+        return " ".join(re.findall(r"[a-z0-9]+", value.lower())).strip()
+
+    @classmethod
+    def _value_map(cls, values: list[str]) -> dict[str, str]:
+        return {
+            normalized: value.strip()
+            for value in values
+            if value and (normalized := cls._normalize_phrase(value))
+        }
+
+    @classmethod
+    def _version_map(cls, values: list[str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for value in values:
+            if not value or not value.strip():
+                continue
+            match = re.search(
+                r"(?:kubernetes|k8s)?\s*v?(\d+(?:[._-]\d+){1,2})",
+                value,
+                re.IGNORECASE,
+            )
+            if match:
+                normalized[f"v{re.sub(r'[._-]', '.', match.group(1))}"] = value.strip()
+        return normalized
+
+    @classmethod
+    def _critical_errors(cls, value: str) -> set[str]:
+        compact = re.sub(r"[-_\s]+", "", value.lower())
+        critical = {error for error in cls.KNOWN_CRITICAL_ERRORS if error in compact}
+        for match in re.findall(
+            r"\b[A-Za-z_][A-Za-z0-9_.]*(?:Exception|Error)\b", value
+        ):
+            normalized = cls._normalize_phrase(match).replace(" ", "")
+            if normalized not in cls.GENERIC_ERRORS:
+                critical.add(normalized)
+        critical.update(
+            token.lower()
+            for token in re.findall(r"\b(?:[45]\d\d|0x[0-9a-fA-F]+)\b", value)
+        )
+        return critical
 
     @classmethod
     def _distinctive_terms(cls, value: str) -> set[str]:
