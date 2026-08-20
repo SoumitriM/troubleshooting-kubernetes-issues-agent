@@ -9,6 +9,7 @@ Route = Literal["generate_fix", "generate_findings", "request_clarification"]
 
 class IncidentState(TypedDict, total=False):
     user_query: str
+    debug: bool
     extracted_symptom: str | None
     extracted_components: list[str]
     kubernetes_version: str | None
@@ -19,6 +20,7 @@ class IncidentState(TypedDict, total=False):
     top_similarity_score: float | None
     actionable_fix_available: bool
     route: Route
+    route_reason: str
     answer: str
     citations: list[str]
 

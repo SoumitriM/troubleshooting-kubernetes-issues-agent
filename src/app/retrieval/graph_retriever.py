@@ -326,6 +326,20 @@ class GraphRetriever:
                     "debug": {
                         "candidate_pool_size": len(candidates),
                         "accepted_count": len(matched),
+                        "vector_candidates": [
+                            {
+                                "issue_number": issue.get("issue_number"),
+                                "vector_score": float(issue.get("score") or 0.0),
+                            }
+                            for issue in candidates
+                        ],
+                        "reranking": [
+                            {
+                                "issue_number": issue.get("issue_number"),
+                                **issue["relevance"],
+                            }
+                            for issue in candidates
+                        ],
                         "rejected_candidates": [
                             {
                                 "issue_number": issue.get("issue_number"),
@@ -386,9 +400,8 @@ class GraphRetriever:
         candidate_terms = self._distinctive_terms(
             candidate_text
         )
-        matching_error_terms = sorted(
-            (diagnostic_terms & candidate_terms) | matching_critical_errors
-        )
+        symptom_overlap = sorted(diagnostic_terms & candidate_terms)
+        matching_error_terms = sorted(set(symptom_overlap) | matching_critical_errors)
         explicit_version_conflict = bool(
             requested_versions and candidate_versions and not version_keys
         )
@@ -419,6 +432,8 @@ class GraphRetriever:
             "matching_components": matching_components,
             "matching_versions": matching_versions,
             "matching_error_terms": matching_error_terms,
+            "symptom_overlap": symptom_overlap,
+            "version_conflict": explicit_version_conflict,
             "final_relevance_score": round(final_score, 6),
             "accepted": accepted,
             "accepted_by": (

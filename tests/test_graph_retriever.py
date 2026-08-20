@@ -140,6 +140,8 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
         "matching_components": [],
         "matching_versions": [],
         "matching_error_terms": ["owners", "valid"],
+        "symptom_overlap": ["owners", "valid"],
+        "version_conflict": False,
         "final_relevance_score": 0.761,
         "accepted": True,
         "accepted_by": "exceptional_vector",

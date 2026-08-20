@@ -14,7 +14,94 @@ from app.retrieval.graph_retriever import GraphRetriever
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evidence-grounded incident assistant")
     parser.add_argument("--query", required=True)
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Include a sanitized LangGraph execution trace",
+    )
     return parser
+
+
+def _run_debug(workflow, query: str) -> tuple[dict, list[str]]:
+    initial_state = {"user_query": query, "debug": True}
+    state = dict(initial_state)
+    executed_nodes: list[str] = []
+    for update in workflow.stream(initial_state, stream_mode="updates"):
+        for node_name, values in update.items():
+            executed_nodes.append(node_name)
+            if values:
+                state.update(values)
+    return state, executed_nodes
+
+
+def _debug_output(result: dict, query: str, executed_nodes: list[str]) -> dict:
+    context = result.get("retrieved_context", {})
+    retrieval_debug = context.get("debug", {})
+    matched = context.get("matched_issues", [])
+    related = context.get("related_issues", [])
+    reranking = [
+        {
+            "issue_number": detail.get("issue_number"),
+            "vector_score": detail.get("vector_similarity"),
+            "matching_components": detail.get("matching_components", []),
+            "matching_versions": detail.get("matching_versions", []),
+            "matching_error_terms": detail.get("matching_error_terms", []),
+            "symptom_overlap": detail.get("symptom_overlap", []),
+            "version_conflict": detail.get("version_conflict", False),
+            "final_score": detail.get("final_relevance_score"),
+            "accepted": detail.get("accepted", False),
+            "rejection_reason": ", ".join(detail.get("rejection_reasons", []))
+            or None,
+        }
+        for detail in retrieval_debug.get("reranking", [])
+    ]
+    return {
+        "route": result["route"],
+        "answer": result["answer"],
+        "citations": result["citations"],
+        "debug": {
+            "original_user_query": query,
+            "executed_nodes": executed_nodes,
+            "analyze_incident": {
+                "symptom": result.get("extracted_symptom"),
+                "components": result.get("extracted_components", []),
+                "kubernetes_version": result.get("kubernetes_version"),
+                "error_messages": result.get("error_messages", []),
+                "has_sufficient_details": result.get("has_sufficient_details", False),
+            },
+            "vector_candidates_before_reranking": retrieval_debug.get(
+                "vector_candidates", []
+            ),
+            "reranking_details": reranking,
+            "issues_after_reranking": [
+                {
+                    "issue_number": issue.get("issue_number"),
+                    "vector_score": float(issue.get("score") or 0.0),
+                    "final_score": (issue.get("relevance") or {}).get(
+                        "final_relevance_score"
+                    ),
+                }
+                for issue in matched
+            ],
+            "graph_expanded_related_issues": [
+                {
+                    "issue_number": issue.get("issue_number"),
+                    "shared_components": issue.get("shared_components", []),
+                    "shared_versions": issue.get("shared_versions", []),
+                }
+                for issue in related
+            ],
+            "evidence_assessment": {
+                "top_similarity_score": result.get("top_similarity_score"),
+                "actionable_fix_available": result.get(
+                    "actionable_fix_available", False
+                ),
+                "decision": result.get("route"),
+            },
+            "final_route": result["route"],
+            "route_reason": result.get("route_reason"),
+        },
+    }
 
 
 def main() -> None:
@@ -33,19 +120,22 @@ def main() -> None:
         workflow = build_workflow(
             IncidentNodes(fh_genie, retriever, AgentSettings())
         )
-        result = workflow.invoke({"user_query": args.query})
+        if args.debug:
+            result, executed_nodes = _run_debug(workflow, args.query)
+        else:
+            result = workflow.invoke({"user_query": args.query})
     finally:
         driver.close()
-    print(
-        json.dumps(
-            {
-                "route": result["route"],
-                "answer": result["answer"],
-                "citations": result["citations"],
-            },
-            ensure_ascii=False,
-        )
+    output = (
+        _debug_output(result, args.query, executed_nodes)
+        if args.debug
+        else {
+            "route": result["route"],
+            "answer": result["answer"],
+            "citations": result["citations"],
+        }
     )
+    print(json.dumps(output, ensure_ascii=False, indent=2 if args.debug else None))
 
 
 if __name__ == "__main__":

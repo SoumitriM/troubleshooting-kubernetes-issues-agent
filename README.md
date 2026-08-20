@@ -294,6 +294,22 @@ python -m app.agent.cli \
   --query "Non-admin users can enable DRA adminAccess by labeling their namespace"
 ```
 
+Normal mode returns only `route`, `answer`, and `citations`. Add `--debug` to
+print readable JSON containing the sanitized LangGraph update stream:
+
+```bash
+python -m app.agent.cli \
+  --query "Pods enter CrashLoopBackOff after the kubelet restarts on Kubernetes v1.35" \
+  --debug
+```
+
+Debug output shows the structured incident analysis, vector candidate issue
+numbers and scores, deterministic reranking signals and rejection reasons,
+accepted and graph-expanded issue numbers, the evidence decision, executed
+nodes, final route, and route reason. It intentionally excludes API keys,
+environment variables, prompts, complete issue bodies, and full candidate
+records.
+
 The workflow first uses FH Genie to extract the symptom, components, Kubernetes
 version, and error messages. A deterministic clarification gate prevents vague
 reports such as “Kubernetes is not working” from reaching Neo4j at all. Detailed

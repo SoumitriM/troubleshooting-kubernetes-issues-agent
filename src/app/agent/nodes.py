@@ -75,13 +75,16 @@ class IncidentNodes:
         }
 
     def retrieve_evidence(self, state: IncidentState) -> dict[str, Any]:
+        retrieval_options: dict[str, Any] = {
+            "components": state.get("extracted_components", []),
+            "kubernetes_version": state.get("kubernetes_version"),
+            "error_messages": state.get("error_messages", []),
+            "symptom": state.get("extracted_symptom"),
+        }
+        if state.get("debug"):
+            retrieval_options["debug"] = True
         context = self._retriever.retrieve(
-            state["user_query"],
-            5,
-            components=state.get("extracted_components", []),
-            kubernetes_version=state.get("kubernetes_version"),
-            error_messages=state.get("error_messages", []),
-            symptom=state.get("extracted_symptom"),
+            state["user_query"], 5, **retrieval_options
         )
         scores = [
             float(issue["score"])
@@ -111,13 +114,22 @@ class IncidentNodes:
             and actionable
         ):
             route: Route = "generate_fix"
+            route_reason = "verified actionable fix passed relevance thresholds"
         elif relevant:
             route = "generate_findings"
+            route_reason = "relevant incidents found without a verified actionable fix"
         else:
             route = "request_clarification"
+            if context.get("no_close_match"):
+                route_reason = "no candidate passed deterministic reranking"
+            elif score is None or score < self._settings.agent_relevance_threshold:
+                route_reason = "top similarity score was below the evidence threshold"
+            else:
+                route_reason = "retrieved issues lacked meaningful diagnostic overlap"
         result: dict[str, Any] = {
             "actionable_fix_available": route == "generate_fix",
             "route": route,
+            "route_reason": route_reason,
         }
         if route == "request_clarification":
             missing = list(state.get("missing_details", []))
@@ -177,6 +189,9 @@ class IncidentNodes:
             "answer": prefix + ", ".join(self._unique(missing)) + ".",
             "citations": [],
             "route": "request_clarification",
+            "route_reason": state.get(
+                "route_reason", "incident description lacks sufficient diagnostic detail"
+            ),
             "actionable_fix_available": False,
         }
 
