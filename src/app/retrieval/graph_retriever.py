@@ -1,6 +1,7 @@
 import re
 from typing import Any
 
+import snowballstemmer
 from neo4j import Driver
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,8 +33,6 @@ class GraphRetriever:
         "are",
         "can",
         "error",
-        "failed",
-        "failure",
         "enter",
         "for",
         "from",
@@ -43,17 +42,11 @@ class GraphRetriever:
         "pod",
         "pods",
         "problem",
-        "restart",
         "not",
         "that",
         "the",
         "this",
         "with",
-        "working",
-        "break",
-        "fail",
-        "restart",
-        "work",
     }
     KNOWN_CRITICAL_ERRORS = {
         "crashloopbackoff",
@@ -61,6 +54,18 @@ class GraphRetriever:
         "oomkilled",
     }
     GENERIC_ERRORS = {"broken", "error", "failed", "failure", "problem"}
+    STEMMER = snowballstemmer.stemmer("english")
+    GENERIC_SYMPTOM_WORDS = {
+        "break",
+        "broken",
+        "fail",
+        "failure",
+        "restart",
+        "work",
+    }
+    GENERIC_SYMPTOM_STEMS = frozenset(
+        STEMMER.stemWords(GENERIC_SYMPTOM_WORDS)
+    )
 
     MATCHED_ISSUES_QUERY = f"""
     CALL db.index.vector.queryNodes(
@@ -383,9 +388,10 @@ class GraphRetriever:
             )
         )
 
-        query_critical_errors = self._critical_errors(
+        query_critical_error_map = self._critical_error_map(
             " ".join([query, symptom or "", *error_messages])
         )
+        query_critical_errors = set(query_critical_error_map)
         candidate_text = " ".join(
             [
                 str(candidate.get("title") or ""),
@@ -393,7 +399,8 @@ class GraphRetriever:
                 *candidate.get("error_messages", []),
             ]
         )
-        candidate_critical_errors = self._critical_errors(candidate_text)
+        candidate_critical_error_map = self._critical_error_map(candidate_text)
+        candidate_critical_errors = set(candidate_critical_error_map)
         matching_critical_errors = query_critical_errors & candidate_critical_errors
         requested_error_messages = self._value_map(error_messages)
         candidate_error_messages = self._value_map(
@@ -403,25 +410,40 @@ class GraphRetriever:
             set(requested_error_messages) & set(candidate_error_messages)
         )
 
-        diagnostic_terms = self._distinctive_terms(
+        diagnostic_terms = self._distinctive_term_map(
             " ".join([symptom or query, *error_messages])
         )
-        diagnostic_terms -= query_critical_errors
-        diagnostic_terms -= {
+        excluded_terms = set(query_critical_errors)
+        excluded_terms.update(
             term
             for message in requested_error_messages
             for term in message.split()
-        }
+        )
         component_terms = {
             term
             for component in requested_components
             for term in component.split()
         }
-        diagnostic_terms -= component_terms
-        candidate_terms = self._distinctive_terms(candidate_text)
-        matching_symptom_terms = sorted(diagnostic_terms & candidate_terms)
+        excluded_terms.update(component_terms)
+        diagnostic_terms = {
+            key: original
+            for key, original in diagnostic_terms.items()
+            if key not in excluded_terms
+        }
+        candidate_terms = self._distinctive_term_map(candidate_text)
+        matching_symptom_terms = sorted(
+            candidate_terms[key]
+            for key in set(diagnostic_terms) & set(candidate_terms)
+        )
         matching_error_terms = sorted(
-            matching_critical_errors | matching_error_messages
+            {
+                candidate_critical_error_map[key]
+                for key in matching_critical_errors
+            }
+            | {
+                candidate_error_messages[key]
+                for key in matching_error_messages
+            }
         )
         explicit_version_conflict = version_match_type == "conflict"
         exceptional = (
@@ -545,50 +567,60 @@ class GraphRetriever:
 
     @classmethod
     def _critical_errors(cls, value: str) -> set[str]:
-        compact = re.sub(r"[-_\s]+", "", value.lower())
-        critical = {error for error in cls.KNOWN_CRITICAL_ERRORS if error in compact}
+        return set(cls._critical_error_map(value))
+
+    @classmethod
+    def _critical_error_map(cls, value: str) -> dict[str, str]:
+        critical: dict[str, str] = {}
+        for token in re.findall(r"[A-Za-z0-9_-]+", value):
+            normalized = re.sub(r"[-_]", "", token.lower())
+            if normalized in cls.KNOWN_CRITICAL_ERRORS:
+                critical[normalized] = token
         for match in re.findall(
             r"\b[A-Za-z_][A-Za-z0-9_.]*(?:Exception|Error)\b", value
         ):
             normalized = cls._normalize_phrase(match).replace(" ", "")
             if normalized not in cls.GENERIC_ERRORS:
-                critical.add(normalized)
-        critical.update(
-            token.lower()
-            for token in re.findall(r"\b(?:[45]\d\d|0x[0-9a-fA-F]+)\b", value)
-        )
+                critical[normalized] = match
+        for token in re.findall(r"\b(?:[45]\d\d|0x[0-9a-fA-F]+)\b", value):
+            critical[token.lower()] = token
         return critical
 
     @classmethod
     def _distinctive_terms(cls, value: str) -> set[str]:
-        return {
-            normalized
-            for term in re.findall(r"[a-z0-9]+", value.lower())
-            if len(term) >= 4
-            and (normalized := cls._normalize_generic_term(term))
-            not in cls.TERM_STOP_WORDS
-        }
+        return set(cls._distinctive_term_map(value).values())
 
-    @staticmethod
-    def _normalize_generic_term(term: str) -> str:
-        variants = {
-            "restart": "restart",
-            "restarts": "restart",
-            "restarted": "restart",
-            "restarting": "restart",
-            "fail": "fail",
-            "fails": "fail",
-            "failed": "fail",
-            "failing": "fail",
-            "failure": "fail",
-            "work": "work",
-            "works": "work",
-            "working": "work",
-            "break": "break",
-            "breaks": "break",
-            "broken": "break",
-        }
-        return variants.get(term, term)
+    @classmethod
+    def _distinctive_term_map(cls, value: str) -> dict[str, str]:
+        terms: dict[str, str] = {}
+        for raw in re.findall(r"[A-Za-z0-9_.$/():\\-]+", value):
+            original = raw.strip(".,:;[]{}<>'\"")
+            if not original or len(original) < 4:
+                continue
+            comparison = original.lower()
+            if comparison in cls.TERM_STOP_WORDS:
+                continue
+            if not cls._is_technical_token(original):
+                stem = cls.STEMMER.stemWord(comparison)
+                if stem in cls.GENERIC_SYMPTOM_STEMS:
+                    continue
+            terms[comparison] = original
+        return terms
+
+    @classmethod
+    def _is_technical_token(cls, token: str) -> bool:
+        compact = re.sub(r"[-_\s]+", "", token.lower())
+        if compact in cls.KNOWN_CRITICAL_ERRORS:
+            return True
+        if re.fullmatch(r"v?\d+(?:[._-](?:\d+|x|\*))+", token, re.I):
+            return True
+        if re.search(r"[()/\\]|::|[._$-]", token):
+            return True
+        if any(character.isdigit() for character in token):
+            return True
+        if token.isupper() and len(token) > 1:
+            return True
+        return bool(re.search(r"[a-z][A-Z]|[A-Z]{2,}[a-z]", token))
 
     @staticmethod
     def _unique_values(records: list[dict[str, Any]], field: str) -> list[str]:

@@ -317,9 +317,13 @@ version, and error messages. A deterministic clarification gate prevents vague
 reports such as “Kubernetes is not working” from reaching Neo4j at all. Detailed
 reports proceed to GraphRAG retrieval, where results must satisfy both the
 configured similarity threshold and a semantic, component, or version overlap.
-Error-state matches and symptom-term matches are reported separately. Generic
-restart, fail, work, and break inflections do not count as distinctive symptom
-overlap. Version diagnostics distinguish `exact`, `compatible_minor`,
+Error-state matches and symptom-term matches are reported separately. A
+lightweight, rule-based Snowball stemmer compares ordinary symptom words with a
+generic denylist, so restart, fail, work, and break inflections do not count as
+distinctive overlap. It requires no downloaded NLP model. Technical identifiers,
+Kubernetes error states, versions, paths, and code symbols bypass stemming, and
+their original spelling is retained in diagnostics. Version diagnostics
+distinguish `exact`, `compatible_minor`,
 `conflict`, and `unknown`; for example, `v1.35.x` is compatible with `v1.35`
 but is not labeled exact.
 Routing is deterministic:

@@ -144,7 +144,7 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
         "conflicting_versions": [],
         "version_match_type": "unknown",
         "matching_error_terms": [],
-        "matching_symptom_terms": ["owners", "valid"],
+        "matching_symptom_terms": ["Valid", "owners"],
         "version_conflict": False,
         "final_relevance_score": 0.761,
         "accepted": True,
@@ -304,7 +304,7 @@ def test_crashloopbackoff_excludes_unrelated_generic_kubelet_candidate() -> None
         "v1.35"
     ]
     assert context["matched_issues"][0]["relevance"]["matching_error_terms"] == [
-        "crashloopbackoff",
+        "CrashLoopBackOff",
     ]
     assert context["debug"]["rejected_candidates"][0]["issue_number"] == 500
     returned_urls = {
@@ -532,10 +532,83 @@ def test_generic_symptom_inflections_are_not_distinctive() -> None:
         "working",
         "break",
         "breaks",
+        "breaking",
         "broken",
     }
 
     assert GraphRetriever._distinctive_terms(" ".join(generic)) == set()
+
+
+def test_generic_symptoms_are_filtered_by_snowball_stem() -> None:
+    stems = {
+        word: GraphRetriever.STEMMER.stemWord(word)
+        for word in [
+            "restart",
+            "restarts",
+            "restarted",
+            "restarting",
+            "fail",
+            "fails",
+            "failed",
+            "failing",
+            "failure",
+            "work",
+            "works",
+            "working",
+            "break",
+            "breaks",
+            "breaking",
+            "broken",
+        ]
+    }
+
+    assert stems["restart"] == stems["restarts"] == stems["restarted"]
+    assert stems["restart"] == stems["restarting"]
+    assert stems["fail"] == stems["fails"] == stems["failed"] == stems["failing"]
+    assert stems["work"] == stems["works"] == stems["working"]
+    assert stems["break"] == stems["breaks"] == stems["breaking"]
+    assert stems["failure"] in GraphRetriever.GENERIC_SYMPTOM_STEMS
+    assert stems["broken"] in GraphRetriever.GENERIC_SYMPTOM_STEMS
+
+
+def test_technical_tokens_are_not_stemmed_and_keep_original_display() -> None:
+    value = (
+        "CrashLoopBackOff OOMKilled ImagePullBackOff v1.35 "
+        "/var/log/kubelet.log restart_handler $restart RestartWorker PROCESSING"
+    )
+
+    terms = GraphRetriever._distinctive_term_map(value)
+
+    assert terms["crashloopbackoff"] == "CrashLoopBackOff"
+    assert terms["oomkilled"] == "OOMKilled"
+    assert terms["imagepullbackoff"] == "ImagePullBackOff"
+    assert terms["v1.35"] == "v1.35"
+    assert terms["/var/log/kubelet.log"] == "/var/log/kubelet.log"
+    assert terms["restart_handler"] == "restart_handler"
+    assert terms["$restart"] == "$restart"
+    assert terms["restartworker"] == "RestartWorker"
+    assert terms["processing"] == "PROCESSING"
+
+
+def test_matching_symptom_terms_preserve_candidate_spelling() -> None:
+    retriever = GraphRetriever(MagicMock(), MagicMock())
+    relevance = retriever._relevance_explanation(
+        {
+            "score": 0.8,
+            "title": "Objects remain PROCESSING",
+            "summary": None,
+            "components": [],
+            "kubernetes_versions": [],
+            "error_messages": [],
+        },
+        query="objects remain processing",
+        components=[],
+        kubernetes_version=None,
+        error_messages=[],
+        symptom="objects remain processing",
+    )
+
+    assert relevance["matching_symptom_terms"] == ["Objects", "PROCESSING", "remain"]
 
 
 def test_error_and_symptom_matches_are_separate_and_restarts_is_generic() -> None:
@@ -558,7 +631,7 @@ def test_error_and_symptom_matches_are_separate_and_restarts_is_generic() -> Non
         symptom="startup timeout after kubelet restarts",
     )
 
-    assert relevance["matching_error_terms"] == ["crashloopbackoff"]
+    assert relevance["matching_error_terms"] == ["CrashLoopBackOff"]
     assert relevance["matching_symptom_terms"] == ["startup", "timeout"]
     assert "restarts" not in relevance["matching_error_terms"]
     assert "restart" not in relevance["matching_symptom_terms"]
