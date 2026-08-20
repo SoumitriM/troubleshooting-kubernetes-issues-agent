@@ -277,7 +277,11 @@ def test_generic_error_statement_is_not_treated_as_an_error_code() -> None:
 
 
 def test_specific_crashloop_query_calls_retrieval() -> None:
-    context = {"matched_issues": [], "related_issues": []}
+    context = {
+        "matched_issues": [],
+        "related_issues": [],
+        "no_close_match": True,
+    }
     result, _fh_genie, retriever = run_workflow(
         context,
         query="Pods enter CrashLoopBackOff after kubelet restart on Kubernetes v1.35",
@@ -285,6 +289,22 @@ def test_specific_crashloop_query_calls_retrieval() -> None:
 
     assert result["has_sufficient_details"] is True
     assert result["error_messages"] == ["CrashLoopBackOff"]
+    assert result["extracted_components"] == ["kubelet"]
+    assert result["kubernetes_version"] == "v1.35"
+    assert result["route"] == "request_clarification"
+    assert "I already have error CrashLoopBackOff" in result["answer"]
+    assert "component kubelet" in result["answer"]
+    assert "Kubernetes version v1.35" in result["answer"]
+    assert "relevant logs around the restart" in result["answer"]
+    assert "pod events" in result["answer"]
+    assert "container exit reason" in result["answer"]
+    assert "whether one pod or multiple pods are affected" in result["answer"]
+    assert "what changed immediately before the problem" in result["answer"]
+    request = result["answer"].split("Please provide:", 1)[1]
+    assert "exact error message" not in request
+    assert "affected component" not in request
+    assert "Kubernetes version" not in request
+    assert result["retrieved_context"]["related_issues"] == []
     assert retriever.calls == 1
 
 

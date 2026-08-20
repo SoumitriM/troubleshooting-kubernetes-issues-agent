@@ -308,13 +308,20 @@ numbers and scores, deterministic reranking signals and rejection reasons,
 accepted and graph-expanded issue numbers, the evidence decision, executed
 nodes, final route, and route reason. It intentionally excludes API keys,
 environment variables, prompts, complete issue bodies, and full candidate
-records.
+records. Both modes reserve stdout for one valid JSON document; model progress
+and actionable diagnostics go to stderr, while the optional unauthenticated
+Hugging Face download advisory is suppressed.
 
 The workflow first uses FH Genie to extract the symptom, components, Kubernetes
 version, and error messages. A deterministic clarification gate prevents vague
 reports such as “Kubernetes is not working” from reaching Neo4j at all. Detailed
 reports proceed to GraphRAG retrieval, where results must satisfy both the
 configured similarity threshold and a semantic, component, or version overlap.
+Error-state matches and symptom-term matches are reported separately. Generic
+restart, fail, work, and break inflections do not count as distinctive symptom
+overlap. Version diagnostics distinguish `exact`, `compatible_minor`,
+`conflict`, and `unknown`; for example, `v1.35.x` is compatible with `v1.35`
+but is not labeled exact.
 Routing is deterministic:
 
 - `generate_fix` is used only when similarity is sufficient and GraphRAG
@@ -325,7 +332,9 @@ Routing is deterministic:
   matches and graph-expanded related issues are shown in separate sections.
 - `request_clarification` asks for missing version, component, logs, or error
   details when retrieval is insufficient. If reranking found no accepted direct
-  match, it explicitly says no close historical incident was found.
+  match, it explicitly says no close historical incident was found, acknowledges
+  already-known error/component/version facts, and asks only for missing runtime
+  evidence such as logs, pod events, exit reason, scope, and recent changes.
 
 Findings cite only the issue pages whose details appear in the answer.
 Resolution evidence URLs are cited only when `generate_fix` actually uses that

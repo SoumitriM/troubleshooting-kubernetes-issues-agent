@@ -50,6 +50,10 @@ class GraphRetriever:
         "this",
         "with",
         "working",
+        "break",
+        "fail",
+        "restart",
+        "work",
     }
     KNOWN_CRITICAL_ERRORS = {
         "crashloopbackoff",
@@ -369,13 +373,15 @@ class GraphRetriever:
         requested_components = self._value_map(components)
         candidate_components = self._value_map(candidate.get("components", []))
         component_keys = set(requested_components) & set(candidate_components)
-        matching_components = sorted(candidate_components[key] for key in component_keys)
-        requested_versions = self._version_map(
-            [kubernetes_version] if kubernetes_version else []
+        matching_components = sorted(
+            candidate_components[key] for key in component_keys
         )
-        candidate_versions = self._version_map(candidate.get("kubernetes_versions", []))
-        version_keys = set(requested_versions) & set(candidate_versions)
-        matching_versions = sorted(candidate_versions[key] for key in version_keys)
+        version_match_type, matching_versions, conflicting_versions = (
+            self._compare_versions(
+                kubernetes_version,
+                candidate.get("kubernetes_versions", []),
+            )
+        )
 
         query_critical_errors = self._critical_errors(
             " ".join([query, symptom or "", *error_messages])
@@ -389,23 +395,38 @@ class GraphRetriever:
         )
         candidate_critical_errors = self._critical_errors(candidate_text)
         matching_critical_errors = query_critical_errors & candidate_critical_errors
+        requested_error_messages = self._value_map(error_messages)
+        candidate_error_messages = self._value_map(
+            candidate.get("error_messages", [])
+        )
+        matching_error_messages = (
+            set(requested_error_messages) & set(candidate_error_messages)
+        )
 
-        diagnostic_terms = self._distinctive_terms(" ".join([symptom or query, *error_messages]))
+        diagnostic_terms = self._distinctive_terms(
+            " ".join([symptom or query, *error_messages])
+        )
+        diagnostic_terms -= query_critical_errors
+        diagnostic_terms -= {
+            term
+            for message in requested_error_messages
+            for term in message.split()
+        }
         component_terms = {
             term
             for component in requested_components
             for term in component.split()
         }
         diagnostic_terms -= component_terms
-        candidate_terms = self._distinctive_terms(
-            candidate_text
+        candidate_terms = self._distinctive_terms(candidate_text)
+        matching_symptom_terms = sorted(diagnostic_terms & candidate_terms)
+        matching_error_terms = sorted(
+            matching_critical_errors | matching_error_messages
         )
-        symptom_overlap = sorted(diagnostic_terms & candidate_terms)
-        matching_error_terms = sorted(set(symptom_overlap) | matching_critical_errors)
-        explicit_version_conflict = bool(
-            requested_versions and candidate_versions and not version_keys
+        explicit_version_conflict = version_match_type == "conflict"
+        exceptional = (
+            vector_similarity >= self._settings.retrieval_exceptional_vector_score
         )
-        exceptional = vector_similarity >= self._settings.retrieval_exceptional_vector_score
         rejection_reasons: list[str] = []
         if vector_similarity < self._settings.retrieval_min_vector_score:
             rejection_reasons.append("vector_score_below_minimum")
@@ -413,7 +434,7 @@ class GraphRetriever:
             rejection_reasons.append("critical_error_mismatch")
         if requested_components and not component_keys and not exceptional:
             rejection_reasons.append("component_mismatch")
-        if not matching_error_terms:
+        if not (matching_error_terms or matching_symptom_terms):
             rejection_reasons.append("no_distinctive_symptom_overlap")
         if explicit_version_conflict:
             rejection_reasons.append("conflicting_kubernetes_version")
@@ -421,8 +442,14 @@ class GraphRetriever:
             1.0,
             vector_similarity * 0.65
             + (0.10 if matching_components else 0.0)
-            + (0.10 if matching_versions else 0.0)
-            + (0.15 if matching_error_terms else 0.0),
+            + (
+                0.10
+                if version_match_type == "exact"
+                else 0.05
+                if version_match_type == "compatible_minor"
+                else 0.0
+            )
+            + (0.15 if matching_error_terms or matching_symptom_terms else 0.0),
         )
         if final_score < self._settings.retrieval_min_final_relevance_score:
             rejection_reasons.append("final_score_below_minimum")
@@ -431,8 +458,10 @@ class GraphRetriever:
             "vector_similarity": vector_similarity,
             "matching_components": matching_components,
             "matching_versions": matching_versions,
+            "conflicting_versions": conflicting_versions,
+            "version_match_type": version_match_type,
             "matching_error_terms": matching_error_terms,
-            "symptom_overlap": symptom_overlap,
+            "matching_symptom_terms": matching_symptom_terms,
             "version_conflict": explicit_version_conflict,
             "final_relevance_score": round(final_score, 6),
             "accepted": accepted,
@@ -459,19 +488,60 @@ class GraphRetriever:
         }
 
     @classmethod
-    def _version_map(cls, values: list[str]) -> dict[str, str]:
-        normalized: dict[str, str] = {}
-        for value in values:
-            if not value or not value.strip():
-                continue
-            match = re.search(
-                r"(?:kubernetes|k8s)?\s*v?(\d+(?:[._-]\d+){1,2})",
-                value,
-                re.IGNORECASE,
-            )
-            if match:
-                normalized[f"v{re.sub(r'[._-]', '.', match.group(1))}"] = value.strip()
-        return normalized
+    def _parse_version(
+        cls, value: str | None
+    ) -> tuple[int, int, int | None, bool] | None:
+        if not value:
+            return None
+        match = re.search(
+            r"(?:kubernetes|k8s)?\s*v?(\d+)[._-](\d+)"
+            r"(?:[._-](\d+|x|\*))?",
+            value,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        patch = match.group(3)
+        return (
+            int(match.group(1)),
+            int(match.group(2)),
+            int(patch) if patch and patch.lower() not in {"x", "*"} else None,
+            patch is not None,
+        )
+
+    @classmethod
+    def _compare_versions(
+        cls,
+        requested: str | None,
+        candidates: list[str],
+    ) -> tuple[str, list[str], list[str]]:
+        query_version = cls._parse_version(requested)
+        parsed_candidates = [
+            (value.strip(), parsed)
+            for value in candidates
+            if value and (parsed := cls._parse_version(value))
+        ]
+        if not query_version or not parsed_candidates:
+            return "unknown", [], []
+
+        exact: list[str] = []
+        compatible: list[str] = []
+        conflicting: list[str] = []
+        for original, candidate in parsed_candidates:
+            if candidate == query_version:
+                exact.append(original)
+            elif candidate[:2] == query_version[:2] and (
+                candidate[2] is None
+                or query_version[2] is None
+            ):
+                compatible.append(original)
+            else:
+                conflicting.append(original)
+        if exact:
+            return "exact", exact, conflicting
+        if compatible:
+            return "compatible_minor", compatible, conflicting
+        return "conflict", [], conflicting
 
     @classmethod
     def _critical_errors(cls, value: str) -> set[str]:
@@ -492,10 +562,33 @@ class GraphRetriever:
     @classmethod
     def _distinctive_terms(cls, value: str) -> set[str]:
         return {
-            term
+            normalized
             for term in re.findall(r"[a-z0-9]+", value.lower())
-            if len(term) >= 4 and term not in cls.TERM_STOP_WORDS
+            if len(term) >= 4
+            and (normalized := cls._normalize_generic_term(term))
+            not in cls.TERM_STOP_WORDS
         }
+
+    @staticmethod
+    def _normalize_generic_term(term: str) -> str:
+        variants = {
+            "restart": "restart",
+            "restarts": "restart",
+            "restarted": "restart",
+            "restarting": "restart",
+            "fail": "fail",
+            "fails": "fail",
+            "failed": "fail",
+            "failing": "fail",
+            "failure": "fail",
+            "work": "work",
+            "works": "work",
+            "working": "work",
+            "break": "break",
+            "breaks": "break",
+            "broken": "break",
+        }
+        return variants.get(term, term)
 
     @staticmethod
     def _unique_values(records: list[dict[str, Any]], field: str) -> list[str]:

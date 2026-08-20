@@ -1,5 +1,13 @@
 import argparse
 import json
+import logging
+import os
+import sys
+from contextlib import redirect_stdout
+
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from neo4j import GraphDatabase
 
@@ -9,6 +17,28 @@ from app.enrichment.fh_genie_client import EnrichmentSettings, FHGenieClient
 from app.graph.loader import GraphSettings
 from app.retrieval.embeddings import IssueEmbedder
 from app.retrieval.graph_retriever import GraphRetriever
+
+
+class _HuggingFaceAuthenticationNoticeFilter(logging.Filter):
+    """Hide only the optional unauthenticated-download advisory."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage().lower()
+        return not (
+            record.levelno == logging.WARNING
+            and "unauthenticated" in message
+            and (
+                "hugging face" in message
+                or "huggingface" in message
+                or "hf hub" in message
+            )
+        )
+
+
+def _configure_cli_diagnostics() -> None:
+    notice_filter = _HuggingFaceAuthenticationNoticeFilter()
+    logging.getLogger("huggingface_hub").addFilter(notice_filter)
+    logging.getLogger("huggingface_hub.utils._http").addFilter(notice_filter)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,8 +75,10 @@ def _debug_output(result: dict, query: str, executed_nodes: list[str]) -> dict:
             "vector_score": detail.get("vector_similarity"),
             "matching_components": detail.get("matching_components", []),
             "matching_versions": detail.get("matching_versions", []),
+            "conflicting_versions": detail.get("conflicting_versions", []),
+            "version_match_type": detail.get("version_match_type", "unknown"),
             "matching_error_terms": detail.get("matching_error_terms", []),
-            "symptom_overlap": detail.get("symptom_overlap", []),
+            "matching_symptom_terms": detail.get("matching_symptom_terms", []),
             "version_conflict": detail.get("version_conflict", False),
             "final_score": detail.get("final_relevance_score"),
             "accepted": detail.get("accepted", False),
@@ -106,26 +138,31 @@ def _debug_output(result: dict, query: str, executed_nodes: list[str]) -> dict:
 
 def main() -> None:
     args = build_parser().parse_args()
-    graph_settings = GraphSettings()
-    driver = GraphDatabase.driver(
-        graph_settings.neo4j_uri,
-        auth=(
-            graph_settings.neo4j_username,
-            graph_settings.neo4j_password.get_secret_value(),
-        ),
-    )
-    try:
-        fh_genie = FHGenieClient(EnrichmentSettings())
-        retriever = GraphRetriever(driver, IssueEmbedder())
-        workflow = build_workflow(
-            IncidentNodes(fh_genie, retriever, AgentSettings())
+    _configure_cli_diagnostics()
+    # Third-party model loaders occasionally print progress to stdout. Keep stdout
+    # reserved for the CLI's single JSON document while preserving diagnostics on
+    # stderr and allowing genuine exceptions to propagate.
+    with redirect_stdout(sys.stderr):
+        graph_settings = GraphSettings()
+        driver = GraphDatabase.driver(
+            graph_settings.neo4j_uri,
+            auth=(
+                graph_settings.neo4j_username,
+                graph_settings.neo4j_password.get_secret_value(),
+            ),
         )
-        if args.debug:
-            result, executed_nodes = _run_debug(workflow, args.query)
-        else:
-            result = workflow.invoke({"user_query": args.query})
-    finally:
-        driver.close()
+        try:
+            fh_genie = FHGenieClient(EnrichmentSettings())
+            retriever = GraphRetriever(driver, IssueEmbedder())
+            workflow = build_workflow(
+                IncidentNodes(fh_genie, retriever, AgentSettings())
+            )
+            if args.debug:
+                result, executed_nodes = _run_debug(workflow, args.query)
+            else:
+                result = workflow.invoke({"user_query": args.query})
+        finally:
+            driver.close()
     output = (
         _debug_output(result, args.query, executed_nodes)
         if args.debug

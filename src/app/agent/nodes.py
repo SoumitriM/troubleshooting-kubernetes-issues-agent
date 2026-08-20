@@ -132,14 +132,10 @@ class IncidentNodes:
             "route_reason": route_reason,
         }
         if route == "request_clarification":
-            missing = list(state.get("missing_details", []))
-            if context.get("no_close_match"):
-                missing = self._unique(
-                    [*missing, "relevant logs", "an exact error message"]
-                )
-            if not missing:
-                missing = ["additional logs or an exact error message"]
-            result["missing_details"] = missing
+            result["missing_details"] = self._clarification_details(
+                state,
+                after_no_match=bool(context.get("no_close_match")),
+            )
         return result
 
     def generate_fix(self, state: IncidentState) -> dict[str, Any]:
@@ -179,21 +175,72 @@ class IncidentNodes:
         return {"answer": "\n".join(answer_parts), "citations": citations}
 
     def request_clarification(self, state: IncidentState) -> dict[str, Any]:
-        missing = state.get("missing_details", [])
+        missing = self._clarification_details(
+            state,
+            after_no_match=bool(
+                state.get("retrieved_context", {}).get("no_close_match")
+            ),
+        )
         prefix = (
             "No close historical incident was found. Please provide: "
             if state.get("retrieved_context", {}).get("no_close_match")
             else "Please provide: "
         )
+        known: list[str] = []
+        if state.get("error_messages"):
+            known.append("error " + ", ".join(state["error_messages"]))
+        if state.get("extracted_components"):
+            known.append("component " + ", ".join(state["extracted_components"]))
+        if state.get("kubernetes_version"):
+            known.append("Kubernetes version " + state["kubernetes_version"])
+        acknowledgement = (
+            "I already have " + "; ".join(known) + ". " if known else ""
+        )
         return {
-            "answer": prefix + ", ".join(self._unique(missing)) + ".",
+            "answer": acknowledgement + prefix + ", ".join(missing) + ".",
             "citations": [],
             "route": "request_clarification",
             "route_reason": state.get(
-                "route_reason", "incident description lacks sufficient diagnostic detail"
+                "route_reason",
+                "incident description lacks sufficient diagnostic detail",
             ),
             "actionable_fix_available": False,
         }
+
+    def _clarification_details(
+        self,
+        state: IncidentState,
+        *,
+        after_no_match: bool,
+    ) -> list[str]:
+        missing = list(state.get("missing_details", []))
+        if state.get("error_messages"):
+            missing = [item for item in missing if "error message" not in item]
+        if state.get("extracted_components"):
+            missing = [item for item in missing if "component" not in item]
+        if state.get("kubernetes_version"):
+            missing = [item for item in missing if "version" not in item.lower()]
+        if after_no_match:
+            query = state.get("user_query", "")
+            missing = [item for item in missing if item != "relevant logs"]
+            log_request = (
+                "relevant logs around the restart"
+                if re.search(r"\brestart(?:s|ed|ing)?\b", query, re.I)
+                else "relevant logs around the failure"
+            )
+            missing = self._unique(
+                [
+                    *missing,
+                    log_request,
+                    "pod events",
+                    "container exit reason",
+                    "whether one pod or multiple pods are affected",
+                    "what changed immediately before the problem",
+                ]
+            )
+        if not missing:
+            missing = ["specific observed behaviour and relevant logs"]
+        return self._unique(missing)
 
     def _has_evidence_overlap(
         self,

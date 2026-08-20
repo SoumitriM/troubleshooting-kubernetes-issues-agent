@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 from app.agent.nodes import AgentSettings, IncidentNodes
 from app.retrieval.graph_retriever import GraphRetriever
 
@@ -139,8 +141,10 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
         "vector_similarity": 0.94,
         "matching_components": [],
         "matching_versions": [],
-        "matching_error_terms": ["owners", "valid"],
-        "symptom_overlap": ["owners", "valid"],
+        "conflicting_versions": [],
+        "version_match_type": "unknown",
+        "matching_error_terms": [],
+        "matching_symptom_terms": ["owners", "valid"],
         "version_conflict": False,
         "final_relevance_score": 0.761,
         "accepted": True,
@@ -487,3 +491,98 @@ def test_graph_expansion_query_requires_strict_shared_context() -> None:
     assert "size(shared_components) >= 1 AND size(shared_versions) >= 1" in query
     assert "source IN $expansion_sources" in query
     assert "LIMIT $expansion_limit" in query
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected_type", "matching", "conflicting"),
+    [
+        ("v1.35", "exact", ["v1.35"], []),
+        ("v1.35.x", "compatible_minor", ["v1.35.x"], []),
+        ("v1.35.2", "compatible_minor", ["v1.35.2"], []),
+        ("v1.29.15", "conflict", [], ["v1.29.15"]),
+        (None, "unknown", [], []),
+    ],
+)
+def test_version_comparison_distinguishes_exact_compatible_conflict_and_unknown(
+    candidate: str | None,
+    expected_type: str,
+    matching: list[str],
+    conflicting: list[str],
+) -> None:
+    candidates = [candidate] if candidate else []
+
+    result = GraphRetriever._compare_versions("v1.35", candidates)
+
+    assert result == (expected_type, matching, conflicting)
+
+
+def test_generic_symptom_inflections_are_not_distinctive() -> None:
+    generic = {
+        "restart",
+        "restarts",
+        "restarted",
+        "restarting",
+        "fail",
+        "fails",
+        "failed",
+        "failing",
+        "failure",
+        "work",
+        "works",
+        "working",
+        "break",
+        "breaks",
+        "broken",
+    }
+
+    assert GraphRetriever._distinctive_terms(" ".join(generic)) == set()
+
+
+def test_error_and_symptom_matches_are_separate_and_restarts_is_generic() -> None:
+    retriever = GraphRetriever(MagicMock(), MagicMock())
+    candidate = {
+        "score": 0.82,
+        "title": "CrashLoopBackOff during startup after kubelet restarts",
+        "summary": "Container processing reaches a timeout",
+        "components": ["kubelet"],
+        "kubernetes_versions": ["v1.35"],
+        "error_messages": ["CrashLoopBackOff"],
+    }
+
+    relevance = retriever._relevance_explanation(
+        candidate,
+        query="CrashLoopBackOff during startup when kubelet restarts with timeout",
+        components=["kubelet"],
+        kubernetes_version="v1.35",
+        error_messages=["CrashLoopBackOff"],
+        symptom="startup timeout after kubelet restarts",
+    )
+
+    assert relevance["matching_error_terms"] == ["crashloopbackoff"]
+    assert relevance["matching_symptom_terms"] == ["startup", "timeout"]
+    assert "restarts" not in relevance["matching_error_terms"]
+    assert "restart" not in relevance["matching_symptom_terms"]
+    assert relevance["version_match_type"] == "exact"
+
+
+def test_exact_structured_error_message_is_an_error_match_not_a_symptom() -> None:
+    retriever = GraphRetriever(MagicMock(), MagicMock())
+    relevance = retriever._relevance_explanation(
+        {
+            "score": 0.8,
+            "title": "Registry access during startup",
+            "summary": "The image cannot be downloaded",
+            "components": ["kubelet"],
+            "kubernetes_versions": [],
+            "error_messages": ["connection refused"],
+        },
+        query="Image startup reports connection refused",
+        components=["kubelet"],
+        kubernetes_version=None,
+        error_messages=["connection refused"],
+        symptom="image startup",
+    )
+
+    assert relevance["matching_error_terms"] == ["connection refused"]
+    assert "connection" not in relevance["matching_symptom_terms"]
+    assert "refused" not in relevance["matching_symptom_terms"]
