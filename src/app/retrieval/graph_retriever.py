@@ -18,28 +18,23 @@ class GraphRetriever:
     )
     YIELD node, score
     WITH node AS issue, score
-    CALL {{
-        WITH issue
+    CALL (issue) {{
         OPTIONAL MATCH (issue)-[:AFFECTS_COMPONENT]->(component:Component)
         RETURN collect(DISTINCT component.name) AS components
     }}
-    CALL {{
-        WITH issue
+    CALL (issue) {{
         OPTIONAL MATCH (issue)-[:REPORTED_IN_VERSION]->(version:KubernetesVersion)
         RETURN collect(DISTINCT version.version) AS kubernetes_versions
     }}
-    CALL {{
-        WITH issue
+    CALL (issue) {{
         OPTIONAL MATCH (issue)-[:HAS_LABEL]->(label:Label)
         RETURN collect(DISTINCT label.name) AS labels
     }}
-    CALL {{
-        WITH issue
+    CALL (issue) {{
         OPTIONAL MATCH (issue)-[:HAS_ERROR]->(error:ErrorMessage)
         RETURN collect(DISTINCT error.message) AS error_messages
     }}
-    CALL {{
-        WITH issue
+    CALL (issue) {{
         OPTIONAL MATCH (issue)-[:HAS_RESOLUTION]->(resolution:Resolution)
         OPTIONAL MATCH (resolution)-[:SUPPORTED_BY]->(source)
         WITH resolution, collect(DISTINCT source.url) AS evidence_urls
@@ -100,13 +95,11 @@ class GraphRetriever:
               WHERE version.version IN $version_names
           }
       )
-    CALL {
-        WITH issue
+    CALL (issue) {
         OPTIONAL MATCH (issue)-[:AFFECTS_COMPONENT]->(component:Component)
         RETURN collect(DISTINCT component.name) AS issue_components
     }
-    CALL {
-        WITH issue
+    CALL (issue) {
         OPTIONAL MATCH (issue)-[:REPORTED_IN_VERSION]->(version:KubernetesVersion)
         RETURN collect(DISTINCT version.version) AS issue_versions
     }
@@ -116,8 +109,7 @@ class GraphRetriever:
          [name IN issue_versions WHERE name IN $version_names]
              AS shared_versions
     WHERE size(shared_components) > 0 OR size(shared_versions) > 0
-    CALL {
-        WITH issue
+    CALL (issue) {
         OPTIONAL MATCH (issue)-[:HAS_RESOLUTION]->(resolution:Resolution)
         OPTIONAL MATCH (resolution)-[:SUPPORTED_BY]->(source)
         WITH resolution, collect(DISTINCT source.url) AS evidence_urls

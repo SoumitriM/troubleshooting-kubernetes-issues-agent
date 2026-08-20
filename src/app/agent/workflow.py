@@ -15,7 +15,14 @@ def build_workflow(nodes: IncidentNodes):
     graph.add_node("generate_findings", nodes.generate_findings)
     graph.add_node("request_clarification", nodes.request_clarification)
     graph.add_edge(START, "analyze_incident")
-    graph.add_edge("analyze_incident", "retrieve_evidence")
+    graph.add_conditional_edges(
+        "analyze_incident",
+        route_after_analysis,
+        {
+            "retrieve_evidence": "retrieve_evidence",
+            "request_clarification": "request_clarification",
+        },
+    )
     graph.add_edge("retrieve_evidence", "assess_evidence")
     graph.add_conditional_edges(
         "assess_evidence",
@@ -34,3 +41,11 @@ def build_workflow(nodes: IncidentNodes):
 
 def route_after_assessment(state: IncidentState) -> Route:
     return state["route"]
+
+
+def route_after_analysis(state: IncidentState) -> str:
+    return (
+        "retrieve_evidence"
+        if state.get("has_sufficient_details")
+        else "request_clarification"
+    )

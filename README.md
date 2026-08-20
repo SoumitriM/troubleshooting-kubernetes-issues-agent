@@ -265,14 +265,19 @@ python -m app.agent.cli \
   --query "Non-admin users can enable DRA adminAccess by labeling their namespace"
 ```
 
-The workflow first uses FH Genie to extract the symptom, components, and
-Kubernetes version, then retrieves GraphRAG evidence. Routing is deterministic:
+The workflow first uses FH Genie to extract the symptom, components, Kubernetes
+version, and error messages. A deterministic clarification gate prevents vague
+reports such as “Kubernetes is not working” from reaching Neo4j at all. Detailed
+reports proceed to GraphRAG retrieval, where results must satisfy both the
+configured similarity threshold and a semantic, component, or version overlap.
+Routing is deterministic:
 
 - `generate_fix` is used only when similarity is sufficient and GraphRAG
   provides a verified actionable `fixed` or `configuration` resolution with
   exact steps and evidence URLs.
 - `generate_findings` summarizes relevant incidents and components while
-  explicitly stating that no verified actionable fix was found.
+  explicitly stating that no verified actionable fix was found. Direct vector
+  matches and graph-expanded related issues are shown in separate sections.
 - `request_clarification` asks for missing version, component, logs, or error
   details when retrieval is insufficient.
 

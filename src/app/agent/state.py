@@ -12,6 +12,9 @@ class IncidentState(TypedDict, total=False):
     extracted_symptom: str | None
     extracted_components: list[str]
     kubernetes_version: str | None
+    error_messages: list[str]
+    has_sufficient_details: bool
+    missing_details: list[str]
     retrieved_context: dict[str, Any]
     top_similarity_score: float | None
     actionable_fix_available: bool

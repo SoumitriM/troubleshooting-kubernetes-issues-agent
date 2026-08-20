@@ -110,12 +110,15 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
     assert "collect(DISTINCT version.version)" in vector_call.args[0]
     assert "collect(DISTINCT label.name)" in vector_call.args[0]
     assert "collect(DISTINCT error.message)" in vector_call.args[0]
-    assert vector_call.args[0].count("CALL {") == 5
+    assert vector_call.args[0].count("CALL (issue) {") == 5
+    assert "CALL (issue) {\n        WITH issue" not in vector_call.args[0]
     assert "[:HAS_RESOLUTION]" in vector_call.args[0]
     assert "[:SUPPORTED_BY]" in vector_call.args[0]
     assert "verified_disposition" in expansion_call.args[0]
     assert "actionable_fix" in expansion_call.args[0]
     assert "['fixed', 'configuration']" in vector_call.args[0]
+    assert "CALL (issue) {" in expansion_call.args[0]
+    assert "CALL {\n        WITH issue" not in expansion_call.args[0]
     assert expansion_call.kwargs["expansion_limit"] == 3
     assert expansion_call.kwargs["component_names"] == [
         "api machinery",
