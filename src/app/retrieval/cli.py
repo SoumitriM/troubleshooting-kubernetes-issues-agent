@@ -29,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     graph_search.add_argument("--query", required=True)
     graph_search.add_argument("--limit", type=positive_integer, default=5)
+    graph_search.add_argument(
+        "--debug",
+        action="store_true",
+        help="Include accepted and rejected candidate relevance diagnostics",
+    )
     return parser
 
 
@@ -53,7 +58,11 @@ def main() -> None:
             for result in store.search(args.query, args.limit):
                 print(json.dumps(result, ensure_ascii=False))
         else:
-            context = GraphRetriever(driver, embedder).retrieve(args.query, args.limit)
+            context = GraphRetriever(driver, embedder).retrieve(
+                args.query,
+                args.limit,
+                debug=args.debug,
+            )
             print(json.dumps(context, ensure_ascii=False))
     finally:
         driver.close()

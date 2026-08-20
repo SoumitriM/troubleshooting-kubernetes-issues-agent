@@ -236,6 +236,26 @@ Each JSON result contains the issue number, title, summary, URL, and cosine
 similarity score. The embedding model runs locally; its first use may download
 the model files.
 
+GraphRAG fetches a larger vector candidate pool internally and accepts at most
+five direct matches after deterministic reranking by vector similarity, exact
+components and Kubernetes versions, and distinctive error or symptom terms.
+Every accepted match includes a `relevance` explanation. Generic component
+overlap alone does not make a result a direct semantic match. To inspect rejected
+candidates and their scores, add `--debug` to `graph-search`:
+
+```bash
+python -m app.retrieval.cli graph-search \
+  --query "garbage collector keeps processing objects with valid owners" \
+  --limit 5 \
+  --debug
+```
+
+Configure reranking with `RETRIEVAL_MIN_VECTOR_SCORE`,
+`RETRIEVAL_EXCEPTIONAL_VECTOR_SCORE`, and
+`RETRIEVAL_MIN_FINAL_RELEVANCE_SCORE`. Graph expansion starts only from accepted
+direct matches, returns at most three related issues, and requires either two
+shared components or a shared component plus the same version.
+
 For a GraphRAG-style context object, expand the five closest vector matches
 through their components, Kubernetes versions, labels, and error messages:
 

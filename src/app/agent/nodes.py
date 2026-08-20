@@ -75,7 +75,14 @@ class IncidentNodes:
         }
 
     def retrieve_evidence(self, state: IncidentState) -> dict[str, Any]:
-        context = self._retriever.retrieve(state["user_query"], 5)
+        context = self._retriever.retrieve(
+            state["user_query"],
+            5,
+            components=state.get("extracted_components", []),
+            kubernetes_version=state.get("kubernetes_version"),
+            error_messages=state.get("error_messages", []),
+            symptom=state.get("extracted_symptom"),
+        )
         scores = [
             float(issue["score"])
             for issue in context.get("matched_issues", [])
@@ -186,6 +193,9 @@ class IncidentNodes:
             )
         )
         for issue in matched:
+            relevance = issue.get("relevance") or {}
+            if relevance.get("accepted"):
+                return True
             issue_components = {
                 component.strip().lower()
                 for component in issue.get("components", [])

@@ -65,10 +65,16 @@ class FakeRetriever:
         self.context = context
         self.calls = 0
 
-    def retrieve(self, query: str, limit: int) -> dict[str, Any]:
+    def retrieve(self, query: str, limit: int, **kwargs: Any) -> dict[str, Any]:
         self.calls += 1
         assert query
         assert limit == 5
+        assert set(kwargs) == {
+            "components",
+            "kubernetes_version",
+            "error_messages",
+            "symptom",
+        }
         return self.context
 
 

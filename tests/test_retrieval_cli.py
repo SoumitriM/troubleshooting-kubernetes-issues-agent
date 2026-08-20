@@ -91,5 +91,52 @@ def test_graph_search_cli_prints_one_context_object(
 
     output = json.loads(capsys.readouterr().out)
     assert output["matched_issues"][0]["score"] == 0.9
-    graph_retriever.retrieve.assert_called_once_with("valid owners", 5)
+    graph_retriever.retrieve.assert_called_once_with("valid owners", 5, debug=False)
+    driver.close.assert_called_once_with()
+
+
+def test_graph_search_debug_prints_relevance_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    driver, _store, graph_retriever = configure_cli(monkeypatch)
+    graph_retriever.retrieve.return_value = {
+        "query": "CrashLoopBackOff",
+        "matched_issues": [
+            {
+                "issue_number": 501,
+                "relevance": {
+                    "vector_similarity": 0.78,
+                    "matching_components": ["kubelet"],
+                    "matching_versions": ["v1.35"],
+                    "matching_error_terms": ["crashloopbackoff"],
+                    "final_relevance_score": 0.846,
+                },
+            }
+        ],
+        "related_issues": [],
+        "debug": {"candidate_pool_size": 20, "rejected_candidates": []},
+    }
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "app.retrieval.cli",
+            "graph-search",
+            "--query",
+            "CrashLoopBackOff",
+            "--debug",
+        ],
+    )
+
+    cli.main()
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["matched_issues"][0]["relevance"]["vector_similarity"] == 0.78
+    assert output["debug"]["candidate_pool_size"] == 20
+    graph_retriever.retrieve.assert_called_once_with(
+        "CrashLoopBackOff",
+        5,
+        debug=True,
+    )
     driver.close.assert_called_once_with()

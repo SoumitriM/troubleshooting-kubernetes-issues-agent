@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock
 
+from app.agent.nodes import AgentSettings, IncidentNodes
 from app.retrieval.graph_retriever import GraphRetriever
 
 
@@ -105,7 +106,7 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
     ] == ["https://github.com/example/project/issues/9"]
     vector_call, expansion_call = session.run.call_args_list
     assert "db.index.vector.queryNodes" in vector_call.args[0]
-    assert vector_call.kwargs["vector_limit"] == 5
+    assert vector_call.kwargs["vector_limit"] == 20
     assert "collect(DISTINCT component.name)" in vector_call.args[0]
     assert "collect(DISTINCT version.version)" in vector_call.args[0]
     assert "collect(DISTINCT label.name)" in vector_call.args[0]
@@ -125,10 +126,26 @@ def test_retrieve_combines_vector_matches_with_bounded_graph_expansion() -> None
         "garbage collector",
     ]
     assert expansion_call.kwargs["version_names"] == ["v1.31"]
+    assert expansion_call.kwargs["expansion_sources"] == [
+        {
+            "components": ["api machinery", "garbage collector"],
+            "versions": ["v1.31"],
+        }
+    ]
     assert expansion_call.kwargs["matched_issue_keys"] == [
         {"repository": "kubernetes/kubernetes", "issue_number": 10},
-        {"repository": "kubernetes/kubernetes", "issue_number": 11},
     ]
+    assert context["matched_issues"][0]["relevance"] == {
+        "vector_similarity": 0.94,
+        "matching_components": [],
+        "matching_versions": [],
+        "matching_error_terms": ["owners", "valid"],
+        "final_relevance_score": 0.858,
+        "accepted": True,
+        "accepted_by": "exceptional_vector",
+    }
+    assert "size(shared_components) >= 2" in expansion_call.args[0]
+    assert "size(shared_versions) >= 1" in expansion_call.args[0]
 
 
 def test_retrieve_caps_vector_matches_at_five() -> None:
@@ -143,7 +160,7 @@ def test_retrieve_caps_vector_matches_at_five() -> None:
     context = GraphRetriever(driver, embedder).retrieve("query", 100)
 
     assert context == {"query": "query", "matched_issues": [], "related_issues": []}
-    assert session.run.call_args.kwargs["vector_limit"] == 5
+    assert session.run.call_args.kwargs["vector_limit"] == 20
     assert session.run.call_count == 1
 
 
@@ -214,3 +231,129 @@ def test_issue_141293_is_disposition_context_not_an_actionable_solution() -> Non
     assert issue["verified_disposition"]["disposition_verified"] is True
     assert issue["verified_disposition"]["resolution_type"] == "closed_without_fix"
     assert issue["actionable_fix"] is None
+
+
+def test_crashloopbackoff_excludes_unrelated_generic_kubelet_candidate() -> None:
+    candidates = [
+        {
+            "repository": "kubernetes/kubernetes",
+            "issue_number": 500,
+            "title": "Generic kubelet maintenance",
+            "summary": "Routine node maintenance discussion",
+            "url": "https://github.com/kubernetes/kubernetes/issues/500",
+            "score": 0.82,
+            "components": ["kubelet"],
+            "kubernetes_versions": ["v1.34"],
+            "labels": [],
+            "error_messages": [],
+            "verified_disposition": None,
+            "actionable_fix": None,
+        },
+        {
+            "repository": "kubernetes/kubernetes",
+            "issue_number": 501,
+            "title": "Pods enter CrashLoopBackOff after kubelet restart",
+            "summary": "CrashLoopBackOff follows a kubelet restart",
+            "url": "https://github.com/kubernetes/kubernetes/issues/501",
+            "score": 0.78,
+            "components": ["kubelet"],
+            "kubernetes_versions": ["v1.35"],
+            "labels": ["bug"],
+            "error_messages": ["CrashLoopBackOff"],
+            "verified_disposition": None,
+            "actionable_fix": None,
+        },
+    ]
+    driver = MagicMock()
+    session = driver.session.return_value.__enter__.return_value
+    candidate_result = MagicMock()
+    candidate_result.data.return_value = candidates
+    related_result = MagicMock()
+    related_result.data.return_value = []
+    session.run.side_effect = [candidate_result, related_result]
+    embedder = MagicMock()
+    embedder.encode_query.return_value = [0.0] * 384
+
+    context = GraphRetriever(driver, embedder).retrieve(
+        "Pods enter CrashLoopBackOff after kubelet restart on Kubernetes v1.35",
+        components=["kubelet"],
+        kubernetes_version="v1.35",
+        error_messages=["CrashLoopBackOff"],
+        symptom="Pods enter CrashLoopBackOff after kubelet restart",
+        debug=True,
+    )
+
+    assert [issue["issue_number"] for issue in context["matched_issues"]] == [501]
+    assert context["matched_issues"][0]["relevance"]["matching_versions"] == [
+        "v1.35"
+    ]
+    assert context["matched_issues"][0]["relevance"]["matching_error_terms"] == [
+        "crashloopbackoff",
+        "restart",
+    ]
+    assert context["debug"]["rejected_candidates"][0]["issue_number"] == 500
+    returned_urls = {
+        issue["url"]
+        for issue in [
+            *context["matched_issues"],
+            *context["related_issues"],
+        ]
+    }
+    assert "https://github.com/kubernetes/kubernetes/issues/500" not in returned_urls
+    findings = IncidentNodes(
+        MagicMock(),
+        MagicMock(),
+        AgentSettings(_env_file=None),
+    ).generate_findings({"retrieved_context": context})
+    assert "https://github.com/kubernetes/kubernetes/issues/500" not in findings[
+        "citations"
+    ]
+
+
+def test_exact_garbage_collector_query_accepts_issue_141382() -> None:
+    driver = MagicMock()
+    session = driver.session.return_value.__enter__.return_value
+    candidate_result = MagicMock()
+    candidate_result.data.return_value = [
+        {
+            "repository": "kubernetes/kubernetes",
+            "issue_number": 141382,
+            "title": "Garbage collector keeps processing objects with valid owners",
+            "summary": "Objects with valid owners are repeatedly processed",
+            "url": "https://github.com/kubernetes/kubernetes/issues/141382",
+            "score": 0.76,
+            "components": ["garbage collector"],
+            "kubernetes_versions": [],
+            "labels": ["bug"],
+            "error_messages": [],
+            "verified_disposition": None,
+            "actionable_fix": None,
+        }
+    ]
+    related_result = MagicMock()
+    related_result.data.return_value = []
+    session.run.side_effect = [candidate_result, related_result]
+    embedder = MagicMock()
+    embedder.encode_query.return_value = [0.0] * 384
+
+    context = GraphRetriever(driver, embedder).retrieve(
+        "garbage collector keeps processing objects with valid owners",
+        components=["garbage collector"],
+        symptom="keeps processing objects with valid owners",
+    )
+
+    assert [issue["issue_number"] for issue in context["matched_issues"]] == [
+        141382
+    ]
+    relevance = context["matched_issues"][0]["relevance"]
+    assert relevance["matching_components"] == ["garbage collector"]
+    assert relevance["accepted_by"] == "vector_plus_diagnostic_overlap"
+
+
+def test_graph_expansion_query_requires_strict_shared_context() -> None:
+    query = GraphRetriever.RELATED_ISSUES_QUERY
+
+    assert "size(shared_components) >= 2" in query
+    assert "size(shared_components) >= 1 AND size(shared_versions) >= 1" in query
+    assert "source IN $expansion_sources" in query
+    assert "LIMIT $expansion_limit" in query
