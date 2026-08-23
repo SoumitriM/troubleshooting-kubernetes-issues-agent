@@ -2,8 +2,9 @@
 
 Initial FastAPI service for an AI-assisted incident-resolution platform. It
 provides a health endpoint, GitHub issue ingestion, FH Genie issue enrichment,
-a local Neo4j graph loader, and semantic issue search. It does not yet include
-a frontend or Kubernetes deployment configuration.
+a local Neo4j graph loader, semantic issue search, and an evidence-grounded
+incident-analysis API. It does not yet include a frontend or Kubernetes
+deployment configuration.
 
 ## Prerequisites
 
@@ -46,6 +47,22 @@ uvicorn app.main:app --reload
 ```
 
 The health endpoint is available at `http://127.0.0.1:8000/health`.
+
+Analyze an incident through the existing LangGraph workflow:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/incidents/analyze \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"Pods enter CrashLoopBackOff after kubelet restarts on Kubernetes v1.35"}'
+```
+
+The endpoint accepts a non-empty query of at most 4,000 characters and returns
+only `route`, `answer`, and `citations`. It never exposes workflow debug state,
+embeddings, prompts, configuration, or secrets. FastAPI lifespan startup creates
+and verifies one Neo4j driver, loads one embedding model, and compiles one shared
+LangGraph workflow for all requests; shutdown closes the driver. If Neo4j, FH
+Genie, the embedding model, or another required dependency is unavailable, the
+analysis endpoint returns a generic HTTP 503 while `/health` remains available.
 
 Run the tests:
 
@@ -376,6 +393,7 @@ must be between 0 and 1.
 ```text
 .
 ├── src/app/          # FastAPI application package
+│   ├── api/          # Incident-analysis HTTP routes and Pydantic schemas
 │   ├── agent/        # LangGraph evidence-grounded incident assistant
 │   ├── graph/        # Neo4j graph loader and CLI
 │   ├── enrichment/   # FH Genie client, models, and JSONL CLI
