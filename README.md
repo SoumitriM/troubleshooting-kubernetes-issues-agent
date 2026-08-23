@@ -331,12 +331,16 @@ not rediscover structured fields from raw query tokens.
 Error-state matches and symptom-term matches are reported separately. A
 lightweight, rule-based Snowball stemmer compares ordinary symptom words with a
 generic denylist, so restart, fail, work, and break inflections do not count as
-distinctive overlap. It requires no downloaded NLP model. Technical identifiers,
-Kubernetes error states, versions, paths, and code symbols bypass stemming, and
-their original spelling is retained in diagnostics. Version diagnostics
-distinguish `exact`, `compatible_minor`,
+distinctive overlap. A small built-in English stopword list is also stemmed and
+applied after normalization, so auxiliary words such as `have`, `after`, `when`,
+and `their` cannot increase relevance. It requires no downloaded NLP model.
+Meaningful Kubernetes vocabulary remains available, while technical identifiers,
+Kubernetes error states, versions, paths, and code symbols bypass stemming and
+retain their original spelling in diagnostics. Version diagnostics distinguish
+`exact`, `compatible_build`, `compatible_minor`,
 `conflict`, and `unknown`; for example, `v1.35.x` is compatible with `v1.35`
-but is not labeled exact.
+but is not labeled exact, and `v1.36.2-eks-*` is labeled as a compatible vendor
+build for `v1.36.2`.
 Strong symptom/error/component matches from an explicitly conflicting version
 are returned separately as `cross_version_matches`. They are not direct matches,
 do not seed graph expansion, and their resolutions are never treated as applying

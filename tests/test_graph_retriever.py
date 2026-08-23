@@ -597,6 +597,7 @@ def test_graph_expansion_query_requires_strict_shared_context() -> None:
         ("v1.35", "exact", ["v1.35"], []),
         ("v1.35.x", "compatible_minor", ["v1.35.x"], []),
         ("v1.35.2", "compatible_minor", ["v1.35.2"], []),
+        ("v1.36.2-eks-*", "conflict", [], ["v1.36.2-eks-*"]),
         ("v1.29.15", "conflict", [], ["v1.29.15"]),
         (None, "unknown", [], []),
     ],
@@ -612,6 +613,40 @@ def test_version_comparison_distinguishes_exact_compatible_conflict_and_unknown(
     result = GraphRetriever._compare_versions("v1.35", candidates)
 
     assert result == (expected_type, matching, conflicting)
+
+
+def test_vendor_specific_build_is_compatible_build_not_exact() -> None:
+    result = GraphRetriever._compare_versions(
+        "v1.36.2",
+        ["v1.36.2-eks-*"],
+    )
+
+    assert result == ("compatible_build", ["v1.36.2-eks-*"], [])
+
+
+def test_vendor_specific_build_remains_an_accepted_structured_match() -> None:
+    retriever = GraphRetriever(MagicMock(), MagicMock())
+    relevance = retriever._relevance_explanation(
+        {
+            "score": 0.8,
+            "title": "Kubelet startup latency",
+            "summary": None,
+            "components": ["kubelet"],
+            "kubernetes_versions": ["v1.36.2-eks-*"],
+            "error_messages": [],
+        },
+        analysis(
+            symptom="kubelet startup latency",
+            components=["kubelet"],
+            kubernetes_version="v1.36.2",
+        ),
+    )
+
+    assert relevance["version_match_type"] == "compatible_build"
+    assert relevance["matching_versions"] == ["v1.36.2-eks-*"]
+    assert relevance["conflicting_versions"] == []
+    assert relevance["version_conflict"] is False
+    assert relevance["accepted"] is True
 
 
 def test_generic_symptom_inflections_are_not_distinctive() -> None:
@@ -686,6 +721,46 @@ def test_technical_tokens_are_not_stemmed_and_keep_original_display() -> None:
     assert terms["$restart"] == "$restart"
     assert terms["restartworker"] == "RestartWorker"
     assert terms["processing"] == "PROCESSING"
+
+
+def test_static_stopwords_are_removed_but_kubernetes_terms_are_preserved() -> None:
+    stopwords = (
+        "have has had be is are was were do does did with after before when "
+        "while even though their"
+    )
+    terms = GraphRetriever._distinctive_term_map(
+        f"{stopwords} Kubernetes kubelet Pod CrashLoopBackOff"
+    )
+
+    for stopword in stopwords.split():
+        assert stopword not in terms
+    assert terms["kubernetes"] == "Kubernetes"
+    assert terms["kubelet"] == "kubelet"
+    assert terms["pod"] == "Pod"
+    assert terms["crashloopbackoff"] == "CrashLoopBackOff"
+
+
+def test_have_cannot_contribute_to_relevance_score() -> None:
+    retriever = GraphRetriever(MagicMock(), MagicMock())
+    relevance = retriever._relevance_explanation(
+        {
+            "score": 0.8,
+            "title": "have",
+            "summary": None,
+            "components": ["kubelet"],
+            "kubernetes_versions": [],
+            "error_messages": [],
+        },
+        analysis(symptom="have", components=["kubelet"]),
+    )
+
+    assert "have" not in [
+        term.lower() for term in relevance["matching_symptom_terms"]
+    ]
+    assert relevance["matching_symptom_terms"] == []
+    assert relevance["final_relevance_score"] == 0.62
+    assert relevance["accepted"] is False
+    assert "no_distinctive_symptom_overlap" in relevance["rejection_reasons"]
 
 
 def test_matching_symptom_terms_preserve_candidate_spelling() -> None:

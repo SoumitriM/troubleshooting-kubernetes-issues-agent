@@ -28,32 +28,110 @@ class GraphRetriever:
     MAX_VECTOR_MATCHES = 5
     MIN_CANDIDATE_POOL = 20
     EXPANSION_LIMIT = 3
-    TERM_STOP_WORDS = {
+    ENGLISH_STOP_WORDS = {
+        "about",
         "after",
+        "again",
+        "against",
+        "also",
         "and",
         "are",
+        "before",
+        "being",
+        "between",
+        "both",
         "can",
-        "error",
+        "could",
+        "does",
+        "doing",
+        "done",
+        "during",
+        "even",
         "enter",
         "for",
         "from",
+        "further",
+        "have",
+        "having",
+        "here",
         "into",
-        "issue",
-        "kubernetes",
-        "pod",
-        "pods",
-        "problem",
-        "not",
+        "more",
+        "most",
+        "only",
+        "other",
+        "over",
+        "same",
+        "should",
+        "some",
+        "such",
+        "than",
         "that",
-        "the",
+        "their",
+        "then",
+        "there",
+        "these",
+        "they",
         "this",
+        "those",
+        "though",
+        "through",
+        "under",
+        "very",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
         "with",
+        "would",
+    }
+    # Short entries are retained even though the token-length gate currently removes
+    # them, keeping the static list complete if that gate changes later.
+    ENGLISH_STOP_WORDS.update(
+        {
+            "a",
+            "an",
+            "be",
+            "do",
+            "did",
+            "had",
+            "has",
+            "he",
+            "her",
+            "him",
+            "his",
+            "i",
+            "in",
+            "is",
+            "it",
+            "its",
+            "me",
+            "my",
+            "of",
+            "on",
+            "or",
+            "our",
+            "she",
+            "the",
+            "to",
+            "was",
+            "we",
+            "you",
+            "your",
+        }
+    )
+    DOMAIN_GENERIC_WORDS = {
+        "error",
+        "issue",
+        "problem",
     }
     KNOWN_CRITICAL_ERRORS = {
         "crashloopbackoff",
         "imagepullbackoff",
         "oomkilled",
     }
+    KUBERNETES_TERMS = {"kubernetes", "kubelet", "node", "pod", "pods"}
     GENERIC_ERRORS = {"broken", "error", "failed", "failure", "problem"}
     STEMMER = snowballstemmer.stemmer("english")
     GENERIC_SYMPTOM_WORDS = {
@@ -67,6 +145,8 @@ class GraphRetriever:
     GENERIC_SYMPTOM_STEMS = frozenset(
         STEMMER.stemWords(GENERIC_SYMPTOM_WORDS)
     )
+    STOPWORD_STEMS = frozenset(STEMMER.stemWords(ENGLISH_STOP_WORDS))
+    DOMAIN_GENERIC_STEMS = frozenset(STEMMER.stemWords(DOMAIN_GENERIC_WORDS))
 
     MATCHED_ISSUES_QUERY = f"""
     CALL db.index.vector.queryNodes(
@@ -490,6 +570,8 @@ class GraphRetriever:
             + (
                 0.10
                 if version_match_type == "exact"
+                else 0.075
+                if version_match_type == "compatible_build"
                 else 0.05
                 if version_match_type == "compatible_minor"
                 else 0.0
@@ -561,12 +643,13 @@ class GraphRetriever:
     @classmethod
     def _parse_version(
         cls, value: str | None
-    ) -> tuple[int, int, int | None, bool] | None:
+    ) -> tuple[int, int, int | None, bool, str | None] | None:
         if not value:
             return None
         match = re.search(
             r"(?:kubernetes|k8s)?\s*v?(\d+)[._-](\d+)"
-            r"(?:[._-](\d+|x|\*))?",
+            r"(?:[._-](\d+|x|\*))?"
+            r"(?P<build>[-+][0-9A-Za-z.*_-]+)?",
             value,
             re.IGNORECASE,
         )
@@ -578,6 +661,7 @@ class GraphRetriever:
             int(match.group(2)),
             int(patch) if patch and patch.lower() not in {"x", "*"} else None,
             patch is not None,
+            match.group("build").lower() if match.group("build") else None,
         )
 
     @classmethod
@@ -596,11 +680,16 @@ class GraphRetriever:
             return "unknown", [], []
 
         exact: list[str] = []
+        compatible_build: list[str] = []
         compatible: list[str] = []
         conflicting: list[str] = []
         for original, candidate in parsed_candidates:
             if candidate == query_version:
                 exact.append(original)
+            elif candidate[:4] == query_version[:4] and (
+                candidate[4] is not None or query_version[4] is not None
+            ):
+                compatible_build.append(original)
             elif candidate[:2] == query_version[:2] and (
                 candidate[2] is None
                 or query_version[2] is None
@@ -610,6 +699,8 @@ class GraphRetriever:
                 conflicting.append(original)
         if exact:
             return "exact", exact, conflicting
+        if compatible_build:
+            return "compatible_build", compatible_build, conflicting
         if compatible:
             return "compatible_minor", compatible, conflicting
         return "conflict", [], conflicting
@@ -644,14 +735,26 @@ class GraphRetriever:
         terms: dict[str, str] = {}
         for raw in re.findall(r"[A-Za-z0-9_.$/():\\-]+", value):
             original = raw.strip(".,:;[]{}<>'\"")
-            if not original or len(original) < 4:
+            if not original:
                 continue
             comparison = original.lower()
-            if comparison in cls.TERM_STOP_WORDS:
+            technical = cls._is_technical_token(original)
+            if (
+                len(original) < 4
+                and not technical
+                and comparison not in cls.KUBERNETES_TERMS
+            ):
                 continue
-            if not cls._is_technical_token(original):
+            if technical:
+                if comparison in cls.ENGLISH_STOP_WORDS:
+                    continue
+            else:
                 stem = cls.STEMMER.stemWord(comparison)
-                if stem in cls.GENERIC_SYMPTOM_STEMS:
+                if (
+                    stem in cls.STOPWORD_STEMS
+                    or stem in cls.DOMAIN_GENERIC_STEMS
+                    or stem in cls.GENERIC_SYMPTOM_STEMS
+                ):
                     continue
             terms[comparison] = original
         return terms
