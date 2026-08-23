@@ -1,6 +1,7 @@
 import re
 from typing import Any
 
+from langgraph.types import interrupt
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -26,13 +27,25 @@ class IncidentNodes:
         fh_genie: FHGenieClient,
         retriever: GraphRetriever,
         settings: AgentSettings,
+        *,
+        enable_interrupts: bool = False,
     ) -> None:
         self._fh_genie = fh_genie
         self._retriever = retriever
         self._settings = settings
+        self._enable_interrupts = enable_interrupts
 
     def analyze_incident(self, state: IncidentState) -> dict[str, Any]:
-        facts = self._fh_genie.enrich(state["user_query"], None)
+        original_query = state.get("original_query") or state["user_query"]
+        history = list(state.get("clarification_history", []))
+        analysis_query = "\n".join(
+            [original_query]
+            + [
+                f"Clarification {index}: {answer}"
+                for index, answer in enumerate(history, 1)
+            ]
+        )
+        facts = self._fh_genie.enrich(analysis_query, None)
         symptom = facts.symptom
         specific_symptom = bool(symptom and not self._is_generic(symptom))
         error_messages = [
@@ -43,15 +56,29 @@ class IncidentNodes:
         query_error_signals = re.findall(
             r"\b(?:[45]\d\d|0x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]+Error|"
             r"CrashLoopBackOff|[A-Z][A-Z0-9_-]*\d+[A-Z0-9_-]*)\b",
-            state["user_query"],
+            analysis_query,
         )
         error_messages = self._unique([*error_messages, *query_error_signals])
         version = facts.kubernetes_versions[0] if facts.kubernetes_versions else None
-        behavior = self._has_problematic_behavior(state["user_query"])
+        behavior = self._has_problematic_behavior(analysis_query)
+        previous = state.get("query_analysis")
+        components = self._unique(
+            [*(previous.components if previous else []), *facts.components]
+        )
+        error_messages = self._unique(
+            [*(previous.error_messages if previous else []), *error_messages]
+        )
+        symptom = (
+            symptom
+            if specific_symptom
+            else (previous.symptom if previous else None)
+        )
+        specific_symptom = bool(symptom and not self._is_generic(symptom))
+        version = version or (previous.kubernetes_version if previous else None)
         has_sufficient_details = bool(
             error_messages
             or specific_symptom
-            or (facts.components and behavior)
+            or (components and behavior)
             or (version and behavior)
         )
         missing_details: list[str] = []
@@ -59,7 +86,7 @@ class IncidentNodes:
             missing_details.append("specific observed behaviour")
         if not error_messages:
             missing_details.append("exact error message or error code")
-        if not facts.components:
+        if not components:
             missing_details.append("affected component")
         if not version:
             missing_details.append("Kubernetes version")
@@ -67,13 +94,18 @@ class IncidentNodes:
             missing_details.append("relevant logs")
         analysis = QueryAnalysis(
             symptom=symptom if specific_symptom else None,
-            components=facts.components,
+            components=components,
             kubernetes_version=version,
             error_messages=error_messages,
             has_sufficient_details=has_sufficient_details,
             missing_details=missing_details,
         )
         return {
+            "original_query": original_query,
+            "user_query": analysis_query,
+            "clarification_history": history,
+            "clarification_attempts": state.get("clarification_attempts", 0),
+            "clarification_exhausted": False,
             "query_analysis": analysis,
             "extracted_symptom": analysis.symptom,
             "extracted_components": analysis.components,
@@ -207,14 +239,48 @@ class IncidentNodes:
                 "A similar symptom exists in another Kubernetes version, but its "
                 "resolution must not be assumed to apply to your version. "
             )
+        question = (
+            acknowledgement
+            + cross_version_notice
+            + prefix
+            + ", ".join(missing)
+            + "."
+        )
+        attempts = state.get("clarification_attempts", 0)
+        if self._enable_interrupts:
+            if attempts >= 3:
+                return {
+                    "answer": (
+                        "I could not collect enough diagnostic detail after three "
+                        "clarification attempts. Still needed: "
+                        + ", ".join(missing)
+                        + "."
+                    ),
+                    "citations": [],
+                    "route": "request_clarification",
+                    "route_reason": "maximum clarification attempts reached",
+                    "actionable_fix_available": False,
+                    "clarification_exhausted": True,
+                }
+            response = interrupt(
+                {
+                    "question": question,
+                    "known_details": self._known_details(state),
+                    "missing_details": missing,
+                }
+            )
+            return {
+                "clarification_history": [
+                    *state.get("clarification_history", []),
+                    str(response).strip(),
+                ],
+                "clarification_attempts": attempts + 1,
+                "clarification_exhausted": False,
+                "answer": "",
+                "citations": [],
+            }
         return {
-            "answer": (
-                acknowledgement
-                + cross_version_notice
-                + prefix
-                + ", ".join(missing)
-                + "."
-            ),
+            "answer": question,
             "citations": [],
             "route": "request_clarification",
             "route_reason": state.get(
@@ -223,6 +289,19 @@ class IncidentNodes:
             ),
             "actionable_fix_available": False,
         }
+
+    @staticmethod
+    def _known_details(state: IncidentState) -> dict[str, Any]:
+        known: dict[str, Any] = {}
+        if state.get("extracted_symptom"):
+            known["symptom"] = state["extracted_symptom"]
+        if state.get("extracted_components"):
+            known["components"] = state["extracted_components"]
+        if state.get("kubernetes_version"):
+            known["kubernetes_version"] = state["kubernetes_version"]
+        if state.get("error_messages"):
+            known["error_messages"] = state["error_messages"]
+        return known
 
     def _clarification_details(
         self,

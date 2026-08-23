@@ -48,21 +48,67 @@ uvicorn app.main:app --reload
 
 The health endpoint is available at `http://127.0.0.1:8000/health`.
 
-Analyze an incident through the existing LangGraph workflow:
+Start or continue an incident conversation through the LangGraph workflow. A
+stable `thread_id` identifies the checkpointed conversation:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/incidents/analyze \
   -H 'Content-Type: application/json' \
-  -d '{"query":"Pods enter CrashLoopBackOff after kubelet restarts on Kubernetes v1.35"}'
+  -d '{"query":"Kubernetes is not working","thread_id":"demo-thread-1"}'
 ```
 
-The endpoint accepts a non-empty query of at most 4,000 characters and returns
-only `route`, `answer`, and `citations`. It never exposes workflow debug state,
-embeddings, prompts, configuration, or secrets. FastAPI lifespan startup creates
-and verifies one Neo4j driver, loads one embedding model, and compiles one shared
-LangGraph workflow for all requests; shutdown closes the driver. If Neo4j, FH
-Genie, the embedding model, or another required dependency is unavailable, the
-analysis endpoint returns a generic HTTP 503 while `/health` remains available.
+An underspecified report pauses with a safe public response:
+
+```json
+{
+  "thread_id": "demo-thread-1",
+  "status": "needs_clarification",
+  "question": "Please provide: specific observed behaviour, exact error message or error code, Kubernetes version, relevant logs.",
+  "known_details": {},
+  "missing_details": [
+    "specific observed behaviour",
+    "exact error message or error code",
+    "affected component",
+    "Kubernetes version",
+    "relevant logs"
+  ]
+}
+```
+
+Resume the same checkpoint with the user's additional evidence:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/incidents/demo-thread-1/resume \
+  -H 'Content-Type: application/json' \
+  -d '{"answer":"The garbage collector repeatedly processes objects with valid owners on Kubernetes v1.36.2"}'
+```
+
+A completed response contains only the public result:
+
+```json
+{
+  "thread_id": "demo-thread-1",
+  "status": "completed",
+  "route": "generate_findings",
+  "answer": "...",
+  "citations": ["https://github.com/kubernetes/kubernetes/issues/141382"]
+}
+```
+
+Queries and clarification answers accept at most 4,000 characters; thread IDs
+accept up to 128 letters, digits, dots, underscores, colons, or hyphens. The
+workflow merges facts from the original query and every clarification. It asks
+at most three times, then safely reports what is still missing. FastAPI owns one
+`AsyncSqliteSaver` at `data/checkpoints.sqlite`, one Neo4j driver, one embedding
+model, and one compiled workflow for its lifespan and closes persistent
+resources during shutdown. Checkpoint deserialization uses strict MessagePack
+allowlisting without pickle fallback. Tests use `InMemorySaver` and make no FH
+Genie or Neo4j calls.
+
+The API never exposes checkpoint state, workflow debug data, embeddings, prompts,
+configuration, or secrets. If Neo4j, FH Genie, the embedding model, or another
+required dependency is unavailable, incident endpoints return a generic HTTP
+503 while `/health` remains available.
 
 Run the tests:
 

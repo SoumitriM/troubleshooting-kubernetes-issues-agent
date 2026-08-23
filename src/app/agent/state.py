@@ -21,7 +21,11 @@ class QueryAnalysis(BaseModel):
 
 
 class IncidentState(TypedDict, total=False):
+    original_query: str
     user_query: str
+    clarification_history: list[str]
+    clarification_attempts: int
+    clarification_exhausted: bool
     debug: bool
     query_analysis: QueryAnalysis
     extracted_symptom: str | None

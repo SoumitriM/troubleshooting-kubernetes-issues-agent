@@ -1,10 +1,15 @@
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agent.nodes import IncidentNodes
 from app.agent.state import IncidentState, Route
 
 
-def build_workflow(nodes: IncidentNodes):
+def build_workflow(
+    nodes: IncidentNodes,
+    *,
+    checkpointer: BaseCheckpointSaver | None = None,
+):
     """Compile the evidence-grounded incident-assistant graph."""
 
     graph = StateGraph(IncidentState)
@@ -35,8 +40,12 @@ def build_workflow(nodes: IncidentNodes):
     )
     graph.add_edge("generate_fix", END)
     graph.add_edge("generate_findings", END)
-    graph.add_edge("request_clarification", END)
-    return graph.compile()
+    graph.add_conditional_edges(
+        "request_clarification",
+        route_after_clarification,
+        {"analyze_incident": "analyze_incident", "end": END},
+    )
+    return graph.compile(checkpointer=checkpointer)
 
 
 def route_after_assessment(state: IncidentState) -> Route:
@@ -49,3 +58,9 @@ def route_after_analysis(state: IncidentState) -> str:
         if state["query_analysis"].has_sufficient_details
         else "request_clarification"
     )
+
+
+def route_after_clarification(state: IncidentState) -> str:
+    if state.get("clarification_exhausted") or state.get("answer"):
+        return "end"
+    return "analyze_incident"

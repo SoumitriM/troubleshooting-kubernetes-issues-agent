@@ -24,3 +24,7 @@ env/
 # Generated ingestion data
 data/raw/*.jsonl
 data/processed/*.jsonl
+data/checkpoints.sqlite
+data/checkpoints.sqlite-shm
+data/checkpoints.sqlite-wal
+data/checkpoints.sqlite-journal
