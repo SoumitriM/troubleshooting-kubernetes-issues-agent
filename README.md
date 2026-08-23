@@ -48,6 +48,73 @@ uvicorn app.main:app --reload
 
 The health endpoint is available at `http://127.0.0.1:8000/health`.
 
+## Docker Compose
+
+Copy `.env.example` to `.env` and configure the Neo4j credentials and FH Genie
+settings before building. Compose injects `FH_GENIE_KEY`,
+`FH_GENIE_BASE_URL`, and `FH_GENIE_MODEL` from that runtime file; `.env` is
+excluded from the image build context and must not be committed.
+
+Build the FastAPI image:
+
+```bash
+docker compose build app
+```
+
+Start Neo4j and the application in the background:
+
+```bash
+mkdir -p data
+docker compose up -d
+```
+
+The application waits for Neo4j's health check and connects to it internally at
+`neo4j://neo4j:7687`. The existing Neo4j named volume remains
+`neo4j_data`; application data is bind-mounted from `./data` to `/app/data`, so
+LangGraph checkpoints in `data/checkpoints.sqlite` survive container restarts.
+The application runs as a non-root user with one Uvicorn worker and one Compose
+replica. Do not scale this service horizontally while it uses the local SQLite
+checkpointer.
+
+Check service status and follow application logs:
+
+```bash
+docker compose ps
+docker compose logs -f app
+```
+
+Check the application health endpoint:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Start a checkpointed incident conversation:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/incidents/analyze \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"Kubernetes is not working","thread_id":"demo-thread-1"}'
+```
+
+Resume it after the API requests clarification:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/incidents/demo-thread-1/resume \
+  -H 'Content-Type: application/json' \
+  -d '{"answer":"The garbage collector repeatedly processes objects with valid owners on Kubernetes v1.36.2"}'
+```
+
+Stop and remove the containers and network without deleting the existing named
+Neo4j volume:
+
+```bash
+docker compose down
+```
+
+Do not add `--volumes` to that command unless you explicitly intend to delete
+the Neo4j data volume.
+
 Start or continue an incident conversation through the LangGraph workflow. A
 stable `thread_id` identifies the checkpointed conversation:
 
