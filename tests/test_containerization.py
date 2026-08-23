@@ -15,6 +15,8 @@ def test_dockerfile_runs_fastapi_as_non_root_with_one_worker() -> None:
     assert '"--workers", "1"' in dockerfile
     assert "/health" in dockerfile
     assert "COPY .env" not in dockerfile
+    assert "COPY --from=builder /opt/venv" not in dockerfile
+    assert "python -m pip install --no-compile ." in dockerfile
 
 
 def test_dockerignore_excludes_secrets_state_and_generated_files() -> None:
