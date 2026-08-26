@@ -78,7 +78,7 @@ def test_pause_resume_merges_analysis_and_completes() -> None:
     with TestClient(app) as client:
         paused = client.post(
             "/api/incidents/analyze",
-            json={"query": "Kubernetes is not working", "thread_id": "merge-1"},
+            json={"query": "kubelet is not working", "thread_id": "merge-1"},
         )
         resumed = client.post(
             "/api/incidents/merge-1/resume",

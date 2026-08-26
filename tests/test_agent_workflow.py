@@ -16,6 +16,8 @@ class FakeFHGenie:
         normalized = title.lower()
         if normalized in {
             "kubernetes is not working",
+            "my kubernetes cluster is not working",
+            "some kubernetes objects behave incorrectly",
             "something is broken",
             "there is an error",
         }:
@@ -26,6 +28,17 @@ class FakeFHGenie:
                 components=[],
                 error_messages=[],
                 kubernetes_versions=[],
+            )
+        if "garbage collector" in normalized:
+            return IssueEnrichment(
+                summary=None,
+                symptom=(
+                    "Garbage collector repeatedly processes objects with valid owners"
+                ),
+                expected_behavior=None,
+                components=["garbage collector"],
+                error_messages=[],
+                kubernetes_versions=["v1.36.2"],
             )
         if "crashloopbackoff" in normalized:
             return IssueEnrichment(
@@ -281,6 +294,45 @@ def test_kubernetes_not_working_requests_clarification_without_retrieval() -> No
     assert "specific observed behaviour" in result["answer"]
     assert retriever.calls == 0
     assert fh_genie.fix_calls == 0
+
+
+def test_generic_objects_behave_incorrectly_requests_clarification() -> None:
+    result, _fh_genie, retriever = run_workflow(
+        {"matched_issues": [matched_issue(0.99, actionable=True)]},
+        query="Some Kubernetes objects behave incorrectly",
+    )
+
+    assert result["route"] == "request_clarification"
+    assert result["has_sufficient_details"] is False
+    assert "specific observed behaviour" in result["answer"]
+    assert retriever.calls == 0
+
+
+def test_cluster_not_working_requests_clarification_without_retrieval() -> None:
+    result, _fh_genie, retriever = run_workflow(
+        {"matched_issues": [matched_issue(0.99, actionable=True)]},
+        query="My Kubernetes cluster is not working",
+    )
+
+    assert result["route"] == "request_clarification"
+    assert result["has_sufficient_details"] is False
+    assert retriever.calls == 0
+
+
+def test_garbage_collector_version_query_calls_retrieval() -> None:
+    result, _fh_genie, retriever = run_workflow(
+        {"matched_issues": [], "related_issues": [], "no_close_match": True},
+        query=(
+            "The garbage collector repeatedly processes objects with valid owners "
+            "on Kubernetes v1.36.2"
+        ),
+    )
+
+    assert result["has_sufficient_details"] is True
+    assert retriever.calls == 1
+    assert retriever.query_analysis is not None
+    assert retriever.query_analysis.components == ["garbage collector"]
+    assert retriever.query_analysis.kubernetes_version == "v1.36.2"
 
 
 def test_something_is_broken_requests_clarification_without_retrieval() -> None:

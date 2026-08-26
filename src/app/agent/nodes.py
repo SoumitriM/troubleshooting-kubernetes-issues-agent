@@ -58,12 +58,35 @@ class IncidentNodes:
             r"CrashLoopBackOff|[A-Z][A-Z0-9_-]*\d+[A-Z0-9_-]*)\b",
             analysis_query,
         )
-        error_messages = self._unique([*error_messages, *query_error_signals])
-        version = facts.kubernetes_versions[0] if facts.kubernetes_versions else None
+        error_messages = self._unique(
+            [
+                *[
+                    message
+                    for message in error_messages
+                    if self._text_is_present(message, analysis_query)
+                ],
+                *query_error_signals,
+            ]
+        )
+        version = next(
+            (
+                item
+                for item in facts.kubernetes_versions
+                if self._text_is_present(item, analysis_query)
+            ),
+            None,
+        )
         behavior = self._has_problematic_behavior(analysis_query)
         previous = state.get("query_analysis")
         components = self._unique(
-            [*(previous.components if previous else []), *facts.components]
+            [
+                *(previous.components if previous else []),
+                *[
+                    component
+                    for component in facts.components
+                    if self._component_is_present(component, analysis_query)
+                ],
+            ]
         )
         error_messages = self._unique(
             [*(previous.error_messages if previous else []), *error_messages]
@@ -75,14 +98,24 @@ class IncidentNodes:
         )
         specific_symptom = bool(symptom and not self._is_generic(symptom))
         version = version or (previous.kubernetes_version if previous else None)
-        has_sufficient_details = bool(
+        meaningful_symptom = bool(
             error_messages
-            or specific_symptom
-            or (components and behavior)
-            or (version and behavior)
+            or (
+                specific_symptom
+                and not self._is_generic_incident_query(analysis_query)
+                and behavior
+            )
         )
+        has_diagnostic_detail = bool(
+            components
+            or version
+            or self._resource_kinds(analysis_query)
+            or self._has_log_message(analysis_query)
+            or self._error_codes(analysis_query)
+        )
+        has_sufficient_details = meaningful_symptom and has_diagnostic_detail
         missing_details: list[str] = []
-        if not specific_symptom and not behavior:
+        if not meaningful_symptom:
             missing_details.append("specific observed behaviour")
         if not error_messages:
             missing_details.append("exact error message or error code")
@@ -403,6 +436,54 @@ class IncidentNodes:
         return bool(re.search(r"\b(crashloopbackoff|error\s*\d+|[45]\d\d)\b", normalized))
 
     @classmethod
+    def _is_generic_incident_query(cls, value: str) -> bool:
+        normalized = " ".join(re.findall(r"[a-z0-9]+", value.lower()))
+        contains_generic_phrase = any(
+            re.search(pattern, normalized)
+            for pattern in cls.GENERIC_QUERY_PATTERNS
+        )
+        if not contains_generic_phrase:
+            return False
+        # An earlier vague turn must not veto a later clarification that adds
+        # concrete observed behaviour.
+        return not bool(set(normalized.split()) & cls.BEHAVIOR_TERMS)
+
+    @staticmethod
+    def _text_is_present(value: str, query: str) -> bool:
+        normalized_value = " ".join(re.findall(r"[a-z0-9]+", value.lower()))
+        normalized_query = " ".join(re.findall(r"[a-z0-9]+", query.lower()))
+        return bool(normalized_value and normalized_value in normalized_query)
+
+    @classmethod
+    def _component_is_present(cls, component: str, query: str) -> bool:
+        normalized = " ".join(re.findall(r"[a-z0-9]+", component.lower()))
+        if normalized in cls.GENERIC_COMPONENTS:
+            return False
+        return cls._text_is_present(component, query)
+
+    @classmethod
+    def _resource_kinds(cls, query: str) -> set[str]:
+        tokens = set(re.findall(r"[a-z0-9]+", query.lower()))
+        return tokens & cls.RESOURCE_KINDS
+
+    @staticmethod
+    def _has_log_message(query: str) -> bool:
+        return bool(
+            re.search(
+                r"(?:\blog(?:s| message)?\s*[:=]\s*\S|`[^`]+`|\"[^\"]+\")",
+                query,
+                re.I,
+            )
+        )
+
+    @staticmethod
+    def _error_codes(query: str) -> list[str]:
+        return re.findall(
+            r"\b(?:[45]\d\d|0x[0-9a-fA-F]+|[A-Z][A-Z0-9_-]*\d+[A-Z0-9_-]*)\b",
+            query,
+        )
+
+    @classmethod
     def _semantic_tokens(cls, value: str) -> set[str]:
         return {
             token
@@ -459,6 +540,40 @@ class IncidentNodes:
         "kubernetes problem",
         "kubernetes is not working",
         "something is broken",
+        "behave incorrectly",
+        "something failed",
+    }
+    GENERIC_QUERY_PATTERNS = (
+        r"\bnot working\b",
+        r"\bbehav(?:e|es|ed|ing) incorrectly\b",
+        r"\bhas an issue\b",
+        r"\bsomething fail(?:s|ed|ing)?\b",
+        r"\bkubernetes (?:object|objects|problem)\b",
+    )
+    GENERIC_COMPONENTS = {"kubernetes", "object", "objects", "cluster"}
+    RESOURCE_KINDS = {
+        "configmap",
+        "configmaps",
+        "cronjob",
+        "cronjobs",
+        "daemonset",
+        "daemonsets",
+        "deployment",
+        "deployments",
+        "job",
+        "jobs",
+        "namespace",
+        "namespaces",
+        "node",
+        "nodes",
+        "pod",
+        "pods",
+        "secret",
+        "secrets",
+        "service",
+        "services",
+        "statefulset",
+        "statefulsets",
     }
     BEHAVIOR_TERMS = {
         "allow",
@@ -471,6 +586,9 @@ class IncidentNodes:
         "hang",
         "leak",
         "pending",
+        "process",
+        "processes",
+        "processing",
         "restart",
         "stuck",
         "timeout",
