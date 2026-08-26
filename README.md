@@ -154,7 +154,9 @@ kubectl apply -k k8s
 The application connects to `neo4j://neo4j:7687`. Neo4j data and
 `/app/data/checkpoints.sqlite` use separate `ReadWriteOnce` claims. The FastAPI
 Deployment is fixed at one replica with a `Recreate` strategy because the local
-SQLite checkpointer cannot safely be shared across replicas.
+SQLite checkpointer cannot safely be shared across replicas. Neo4j service-link
+environment injection is disabled because Kubernetes-generated `NEO4J_PORT_*`
+variables are otherwise interpreted as invalid Neo4j configuration settings.
 
 Wait for both workloads and verify their services and claims:
 

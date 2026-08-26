@@ -14,6 +14,9 @@ spec:
       labels:
         app.kubernetes.io/name: neo4j
     spec:
+      # Service-link variables start with NEO4J_ and are misread by the Neo4j
+      # image as database configuration keys (for example PORT.7687.TCP.PORT).
+      enableServiceLinks: false
       containers:
         - name: neo4j
           image: neo4j:5-community

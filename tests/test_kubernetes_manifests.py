@@ -28,6 +28,7 @@ def test_neo4j_and_checkpoint_storage_are_persistent() -> None:
     config = manifest("01-configmap.yaml")
 
     assert "kind: StatefulSet" in statefulset
+    assert "enableServiceLinks: false" in statefulset
     assert "claimName: neo4j-data" in statefulset
     assert "name: neo4j-data" in claims
     assert "name: langgraph-checkpoints" in claims
