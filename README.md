@@ -154,9 +154,7 @@ kubectl apply -k k8s
 The application connects to `neo4j://neo4j:7687`. Neo4j data and
 `/app/data/checkpoints.sqlite` use separate `ReadWriteOnce` claims. The FastAPI
 Deployment is fixed at one replica with a `Recreate` strategy because the local
-SQLite checkpointer cannot safely be shared across replicas. Neo4j service-link
-environment injection is disabled because Kubernetes-generated `NEO4J_PORT_*`
-variables are otherwise interpreted as invalid Neo4j configuration settings.
+SQLite checkpointer cannot safely be shared across replicas.
 
 Wait for both workloads and verify their services and claims:
 
@@ -202,6 +200,21 @@ kubectl -n incident-ai delete secret incident-ai-secrets
 Deleting the `incident-ai` namespace or either PVC permanently removes the
 associated Kubernetes deployment state and may delete stored data, depending on
 the cluster's storage-class reclaim policy.
+
+### Troubleshooting Neo4j CrashLoopBackOff
+
+If Neo4j reports `Unrecognized setting with name: PORT.7687.TCP.PORT`, Kubernetes
+service-link variables were injected with the `NEO4J_` prefix and interpreted as
+Neo4j configuration. Both pod templates set `enableServiceLinks: false`; apply
+the current manifests to roll the pods without deleting their PVCs:
+
+```bash
+kubectl apply -k k8s
+kubectl -n incident-ai rollout status statefulset/neo4j --timeout=5m
+```
+
+Strict Neo4j configuration validation remains enabled; do not work around this
+error by disabling it.
 
 Start or continue an incident conversation through the LangGraph workflow. A
 stable `thread_id` identifies the checkpointed conversation:

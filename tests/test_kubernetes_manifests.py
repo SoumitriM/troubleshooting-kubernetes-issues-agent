@@ -16,6 +16,7 @@ def test_app_deployment_is_single_replica_local_and_non_root() -> None:
     assert "type: Recreate" in deployment
     assert "image: incident-resolution-ai-app:latest" in deployment
     assert "imagePullPolicy: Never" in deployment
+    assert "enableServiceLinks: false" in deployment
     assert "runAsNonRoot: true" in deployment
     assert "runAsUser: 1000" in deployment
     assert deployment.count("path: /health") == 2
