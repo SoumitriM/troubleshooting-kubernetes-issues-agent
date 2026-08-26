@@ -4,7 +4,7 @@ Initial FastAPI service for an AI-assisted incident-resolution platform. It
 provides a health endpoint, GitHub issue ingestion, FH Genie issue enrichment,
 a local Neo4j graph loader, semantic issue search, and an evidence-grounded
 incident-analysis API. It does not yet include a frontend or Kubernetes
-deployment configuration.
+deployment controller; local Kubernetes manifests are provided under `k8s/`.
 
 ## Prerequisites
 
@@ -114,6 +114,92 @@ docker compose down
 
 Do not add `--volumes` to that command unless you explicitly intend to delete
 the Neo4j data volume.
+
+## Kubernetes on Docker Desktop
+
+The manifests in `k8s/` deploy one FastAPI pod and one Neo4j StatefulSet into
+the `incident-ai` namespace. The app image is local-only, uses
+`imagePullPolicy: Never`, and must be named `incident-resolution-ai-app:latest`:
+
+```bash
+docker build -t incident-resolution-ai-app:latest .
+```
+
+Enable Kubernetes in Docker Desktop, then update the non-secret
+`FH_GENIE_BASE_URL` and `FH_GENIE_MODEL` placeholders in
+`k8s/01-configmap.yaml`. Create the namespace and runtime Secret without writing
+real credentials into a manifest:
+
+```bash
+kubectl apply -f k8s/00-namespace.yaml
+
+kubectl -n incident-ai create secret generic incident-ai-secrets \
+  --from-literal=FH_GENIE_KEY="$FH_GENIE_KEY" \
+  --from-literal=NEO4J_USERNAME="$NEO4J_USERNAME" \
+  --from-literal=NEO4J_PASSWORD="$NEO4J_PASSWORD" \
+  --from-literal=NEO4J_AUTH="$NEO4J_USERNAME/$NEO4J_PASSWORD"
+```
+
+Set those shell variables securely before running the command. The committed
+`k8s/02-secret.example.yaml` is a schema example containing placeholders only;
+do not put real values into the tracked file. It is intentionally excluded from
+`k8s/kustomization.yaml`.
+
+Deploy the non-secret resources:
+
+```bash
+kubectl apply -k k8s
+```
+
+The application connects to `neo4j://neo4j:7687`. Neo4j data and
+`/app/data/checkpoints.sqlite` use separate `ReadWriteOnce` claims. The FastAPI
+Deployment is fixed at one replica with a `Recreate` strategy because the local
+SQLite checkpointer cannot safely be shared across replicas.
+
+Wait for both workloads and verify their services and claims:
+
+```bash
+kubectl -n incident-ai rollout status statefulset/neo4j --timeout=5m
+kubectl -n incident-ai rollout status deployment/incident-resolution-ai --timeout=10m
+kubectl -n incident-ai get pods,services,persistentvolumeclaims
+```
+
+Forward the API locally and verify its health and incident endpoint:
+
+```bash
+kubectl -n incident-ai port-forward service/incident-resolution-ai 8000:8000
+```
+
+In another terminal:
+
+```bash
+curl http://127.0.0.1:8000/health
+
+curl -X POST http://127.0.0.1:8000/api/incidents/analyze \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"Kubernetes is not working","thread_id":"k8s-demo-1"}'
+```
+
+For local Neo4j Browser access, forward its HTTP service port:
+
+```bash
+kubectl -n incident-ai port-forward service/neo4j 7474:7474
+```
+
+Stop the workloads and remove networking/configuration while preserving both
+persistent claims:
+
+```bash
+kubectl -n incident-ai delete deployment incident-resolution-ai
+kubectl -n incident-ai delete statefulset neo4j
+kubectl -n incident-ai delete service incident-resolution-ai neo4j
+kubectl -n incident-ai delete configmap incident-ai-config
+kubectl -n incident-ai delete secret incident-ai-secrets
+```
+
+Deleting the `incident-ai` namespace or either PVC permanently removes the
+associated Kubernetes deployment state and may delete stored data, depending on
+the cluster's storage-class reclaim policy.
 
 Start or continue an incident conversation through the LangGraph workflow. A
 stable `thread_id` identifies the checkpointed conversation:

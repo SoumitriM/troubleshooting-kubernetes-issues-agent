@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: incident-resolution-ai
+  namespace: incident-ai
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: incident-resolution-ai
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: incident-resolution-ai
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: incident-resolution-ai-app:latest
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: incident-ai-config
+          env:
+            - name: FH_GENIE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: incident-ai-secrets
+                  key: FH_GENIE_KEY
+            - name: NEO4J_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: incident-ai-secrets
+                  key: NEO4J_USERNAME
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: incident-ai-secrets
+                  key: NEO4J_PASSWORD
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 18
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /app/data
+      volumes:
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: langgraph-checkpoints
