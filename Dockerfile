@@ -17,8 +17,12 @@ RUN apt-get update \
 WORKDIR /tmp/build
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN python -m pip install --upgrade pip \
-    && python -m pip install --no-compile . \
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir --no-compile . \
+    && find /usr/local/lib/python3.11/site-packages \
+        -type d -name __pycache__ -prune -exec rm -rf '{}' + \
+    && find /usr/local/lib/python3.11/site-packages \
+        -type f -name '*.pyc' -delete \
     && rm -rf /tmp/build/*
 
 WORKDIR /app

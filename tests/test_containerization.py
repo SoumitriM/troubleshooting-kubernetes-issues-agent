@@ -8,6 +8,9 @@ def test_dockerfile_runs_fastapi_as_non_root_with_one_worker() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
     assert "FROM python:3.11-slim" in dockerfile
+    assert dockerfile.count("\nFROM ") == 0
+    assert "PYTHONDONTWRITEBYTECODE=1" in dockerfile
+    assert "PYTHONUNBUFFERED=1" in dockerfile
     assert "USER appuser" in dockerfile
     assert '"uvicorn", "app.main:app"' in dockerfile
     assert '"--host", "0.0.0.0"' in dockerfile
@@ -16,7 +19,9 @@ def test_dockerfile_runs_fastapi_as_non_root_with_one_worker() -> None:
     assert "/health" in dockerfile
     assert "COPY .env" not in dockerfile
     assert "COPY --from=builder /opt/venv" not in dockerfile
-    assert "python -m pip install --no-compile ." in dockerfile
+    assert "python -m pip install --no-cache-dir --no-compile ." in dockerfile
+    assert "-type d -name __pycache__" in dockerfile
+    assert "-type f -name '*.pyc' -delete" in dockerfile
 
 
 def test_dockerignore_excludes_secrets_state_and_generated_files() -> None:
