@@ -4,7 +4,53 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-Route = Literal["generate_fix", "generate_findings", "request_clarification"]
+Intent = Literal[
+    "INCIDENT_TROUBLESHOOTING",
+    "GRAPH_ANALYTICS",
+    "GENERAL_KUBERNETES_QUESTION",
+    "NEEDS_CLARIFICATION",
+]
+Route = Literal[
+    "generate_fix",
+    "generate_findings",
+    "answer_from_graph",
+    "general_answer",
+    "request_clarification",
+]
+
+
+class NormalizedQuery(BaseModel):
+    """Meaning-preserving query representation shared by all routes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    normalized_query: str = Field(min_length=1)
+    components: list[str] = Field(default_factory=list)
+    versions: list[str] = Field(default_factory=list)
+    symptoms: list[str] = Field(default_factory=list)
+    entities: list[str] = Field(default_factory=list)
+
+
+class IntentClassification(BaseModel):
+    """Validated intent-router decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    intent: Intent
+    confidence: float = Field(ge=0.0, le=1.0)
+    reasoning: str = Field(min_length=1, max_length=300)
+
+
+class CypherGeneration(BaseModel):
+    """Structured read-only Cypher proposed by the model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cypher: str = Field(min_length=1)
+    parameters: dict[str, str | int | float | bool | list[str]] = Field(
+        default_factory=dict
+    )
+    explanation: str = Field(min_length=1, max_length=500)
 
 
 class QueryAnalysis(BaseModel):
@@ -28,6 +74,17 @@ class IncidentState(TypedDict, total=False):
     clarification_exhausted: bool
     debug: bool
     query_analysis: QueryAnalysis
+    normalized_query: str
+    intent: Intent
+    intent_confidence: float
+    intent_reasoning: str
+    entities: list[str]
+    generated_cypher: str
+    cypher_parameters: dict[str, Any]
+    cypher_explanation: str
+    cypher_validation_errors: list[str]
+    graph_results: list[dict[str, Any]]
+    cypher_attempt_count: int
     extracted_symptom: str | None
     extracted_components: list[str]
     kubernetes_version: str | None

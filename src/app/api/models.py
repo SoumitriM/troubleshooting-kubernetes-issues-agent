@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.agent.state import Route
+from app.agent.state import Intent, Route
 
 
 class IncidentAnalyzeRequest(BaseModel):
@@ -79,3 +79,18 @@ class IncidentCompletedResponse(BaseModel):
 IncidentConversationResponse = (
     IncidentClarificationResponse | IncidentCompletedResponse
 )
+
+
+class KnowledgeQueryRequest(IncidentAnalyzeRequest):
+    """Query accepted by the general Kubernetes assistant."""
+
+
+class KnowledgeQueryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    thread_id: str
+    status: Literal["completed", "needs_clarification"]
+    intent: Intent
+    route: Route
+    answer: str
+    citations: list[str] = Field(default_factory=list)

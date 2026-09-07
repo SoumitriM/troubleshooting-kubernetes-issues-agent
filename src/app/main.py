@@ -16,8 +16,10 @@ from app.agent.checkpointing import strict_checkpoint_serializer
 from app.agent.nodes import AgentSettings, IncidentNodes
 from app.agent.workflow import build_workflow
 from app.api.incidents import router as incidents_router
+from app.api.knowledge import router as knowledge_router
 from app.enrichment.fh_genie_client import EnrichmentSettings, FHGenieClient
 from app.graph.loader import GraphSettings
+from app.graph.analytics import GraphAnalyticsRepository
 from app.retrieval.embeddings import IssueEmbedder
 from app.retrieval.graph_retriever import GraphRetriever
 
@@ -49,6 +51,7 @@ def build_agent_resources(checkpointer: Any | None = None) -> AgentResources:
                 FHGenieClient(EnrichmentSettings()),
                 GraphRetriever(driver, IssueEmbedder()),
                 AgentSettings(),
+                analytics_repository=GraphAnalyticsRepository(driver),
                 enable_interrupts=checkpointer is not None,
             ),
             checkpointer=checkpointer,
@@ -105,6 +108,7 @@ def create_app(
         lifespan=lifespan,
     )
     application.include_router(incidents_router)
+    application.include_router(knowledge_router)
 
     @application.get("/health")
     def health() -> dict[str, str]:

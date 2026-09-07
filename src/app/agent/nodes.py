@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Any
 
@@ -5,9 +6,20 @@ from langgraph.types import interrupt
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.agent.state import IncidentState, QueryAnalysis, Route
-from app.enrichment.fh_genie_client import FHGenieClient
+from app.agent.state import (
+    IncidentState,
+    IntentClassification,
+    NormalizedQuery,
+    QueryAnalysis,
+    Route,
+)
+from app.enrichment.fh_genie_client import EnrichmentResponseError, FHGenieClient
+from app.graph.analytics import GraphAnalyticsRepository
+from app.graph.cypher_validation import CypherValidator
 from app.retrieval.graph_retriever import GraphRetriever
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class AgentSettings(BaseSettings):
@@ -28,18 +40,183 @@ class IncidentNodes:
         retriever: GraphRetriever,
         settings: AgentSettings,
         *,
+        analytics_repository: GraphAnalyticsRepository | None = None,
+        cypher_validator: CypherValidator | None = None,
         enable_interrupts: bool = False,
     ) -> None:
         self._fh_genie = fh_genie
         self._retriever = retriever
         self._settings = settings
+        self._analytics_repository = analytics_repository
+        self._cypher_validator = cypher_validator or CypherValidator()
         self._enable_interrupts = enable_interrupts
+
+    def normalize_query(self, state: IncidentState) -> dict[str, Any]:
+        query = state.get("original_query") or state["user_query"]
+        normalized = self._deterministic_normalization(query)
+        model_normalizer = getattr(self._fh_genie, "normalize_query", None)
+        if model_normalizer is not None:
+            try:
+                candidate = model_normalizer(query)
+                if self._preserves_technical_tokens(query, candidate.normalized_query):
+                    normalized = candidate
+            except (EnrichmentResponseError, ValueError, AttributeError):
+                LOGGER.warning("Query normalization model output was invalid")
+        return {
+            "original_query": query,
+            "user_query": normalized.normalized_query,
+            "normalized_query": normalized.normalized_query,
+            "extracted_components": normalized.components,
+            "kubernetes_version": normalized.versions[0] if normalized.versions else None,
+            "entities": normalized.entities,
+            "error_messages": [],
+            "has_sufficient_details": False,
+            "missing_details": [
+                "specific observed behaviour",
+                "exact error message or error code",
+                "affected component",
+                "Kubernetes version",
+                "relevant logs",
+            ],
+            "cypher_attempt_count": 0,
+            "cypher_validation_errors": [],
+        }
+
+    def classify_intent(self, state: IncidentState) -> dict[str, Any]:
+        query = state["normalized_query"]
+        decision = self._deterministic_intent(query)
+        if decision is None:
+            classifier = getattr(self._fh_genie, "classify_query", None)
+            if classifier is not None:
+                try:
+                    decision = classifier(self._normalization_from_state(state))
+                except (EnrichmentResponseError, ValueError, AttributeError):
+                    LOGGER.warning("Intent classifier returned invalid output")
+        if decision is None:
+            decision = IntentClassification(
+                intent="INCIDENT_TROUBLESHOOTING",
+                confidence=0.55,
+                reasoning="Conservative fallback preserves the existing incident flow",
+            )
+        LOGGER.info(
+            "Query routed intent=%s confidence=%.2f",
+            decision.intent,
+            decision.confidence,
+        )
+        return {
+            "intent": decision.intent,
+            "intent_confidence": decision.confidence,
+            "intent_reasoning": decision.reasoning,
+        }
+
+    def generate_cypher(self, state: IncidentState) -> dict[str, Any]:
+        attempt = state.get("cypher_attempt_count", 0) + 1
+        try:
+            generated = self._fh_genie.generate_cypher(
+                self._normalization_from_state(state),
+                intent=state["intent"],
+                validation_errors=state.get("cypher_validation_errors", []),
+            )
+            LOGGER.info("Generated Cypher attempt=%d", attempt)
+            return {
+                "generated_cypher": generated.cypher,
+                "cypher_parameters": generated.parameters,
+                "cypher_explanation": generated.explanation,
+                "cypher_attempt_count": attempt,
+            }
+        except (EnrichmentResponseError, ValueError, AttributeError):
+            LOGGER.warning("Cypher generation failed attempt=%d", attempt)
+            return {
+                "generated_cypher": "",
+                "cypher_parameters": {},
+                "cypher_validation_errors": ["Cypher generation returned invalid output"],
+                "cypher_attempt_count": attempt,
+            }
+
+    def validate_cypher(self, state: IncidentState) -> dict[str, Any]:
+        result = self._cypher_validator.validate(
+            state.get("generated_cypher", ""),
+            state.get("cypher_parameters", {}),
+        )
+        LOGGER.info(
+            "Cypher validation valid=%s attempt=%d",
+            result.valid,
+            state.get("cypher_attempt_count", 0),
+        )
+        if result.valid:
+            LOGGER.info(
+                "Validated Cypher=%s parameter_names=%s",
+                state["generated_cypher"],
+                sorted(state.get("cypher_parameters", {})),
+            )
+        return {"cypher_validation_errors": list(result.errors)}
+
+    def execute_neo4j(self, state: IncidentState) -> dict[str, Any]:
+        if self._analytics_repository is None:
+            return {
+                "graph_results": [],
+                "answer": "Graph analytics is temporarily unavailable.",
+                "citations": [],
+                "route": "answer_from_graph",
+            }
+        try:
+            rows = self._analytics_repository.execute_read(
+                state["generated_cypher"], state["cypher_parameters"]
+            )
+            LOGGER.info("Graph analytics returned rows=%d", len(rows))
+            return {"graph_results": rows}
+        except Exception:
+            LOGGER.error("Neo4j graph analytics execution failed")
+            return {
+                "graph_results": [],
+                "answer": "Graph analytics is temporarily unavailable.",
+                "citations": [],
+                "route": "answer_from_graph",
+            }
+
+    def answer_from_graph(self, state: IncidentState) -> dict[str, Any]:
+        if state.get("answer"):
+            return {}
+        rows = state.get("graph_results", [])
+        answerer = getattr(self._fh_genie, "answer_graph_question", None)
+        answer = (
+            answerer(state["normalized_query"], rows)
+            if answerer is not None
+            else self._format_graph_results(rows)
+        )
+        return {
+            "answer": answer,
+            "citations": [],
+            "route": "answer_from_graph",
+        }
+
+    def graph_query_failed(self, state: IncidentState) -> dict[str, Any]:
+        return {
+            "answer": (
+                "I could not produce a safe graph query after two attempts. "
+                "Please make the analytics question more specific."
+            ),
+            "citations": [],
+            "route": "answer_from_graph",
+        }
+
+    @staticmethod
+    def answer_general_question(state: IncidentState) -> dict[str, Any]:
+        return {
+            "answer": (
+                "General Kubernetes documentation retrieval is not configured yet. "
+                "I will not infer a conceptual answer from incident records."
+            ),
+            "citations": [],
+            "route": "general_answer",
+        }
 
     def analyze_incident(self, state: IncidentState) -> dict[str, Any]:
         original_query = state.get("original_query") or state["user_query"]
+        normalized_query = state.get("normalized_query") or original_query
         history = list(state.get("clarification_history", []))
         analysis_query = "\n".join(
-            [original_query]
+            [normalized_query]
             + [
                 f"Clarification {index}: {answer}"
                 for index, answer in enumerate(history, 1)
@@ -531,6 +708,132 @@ class IncidentNodes:
     @staticmethod
     def _unique(values: Any) -> list[str]:
         return list(dict.fromkeys(value for value in values if value))
+
+    @classmethod
+    def _deterministic_normalization(cls, query: str) -> NormalizedQuery:
+        cleaned = " ".join(query.strip().split())
+        versions = cls._unique(
+            re.findall(r"\bv?\d+\.\d+(?:\.\d+)?\b", cleaned, re.I)
+        )
+        component_terms = (
+            "kubelet",
+            "kube-apiserver",
+            "api server",
+            "scheduler",
+            "controller manager",
+            "etcd",
+            "containerd",
+            "kube-proxy",
+            "certificate",
+            "certificates",
+            "pod",
+            "pods",
+        )
+        components = [
+            term for term in component_terms if re.search(rf"\b{re.escape(term)}\b", cleaned, re.I)
+        ]
+        entities = cls._unique(
+            [
+                *components,
+                *versions,
+                *re.findall(r"\bCVE-\d{4}-\d+\b", cleaned, re.I),
+                *re.findall(r"(?:#|issues?/)(\d+)\b", cleaned, re.I),
+            ]
+        )
+        symptoms = (
+            [cleaned]
+            if cls._has_problematic_behavior(cleaned)
+            or re.search(r"CrashLoopBackOff|crash(?:es|ed|ing)?", cleaned, re.I)
+            else []
+        )
+        return NormalizedQuery(
+            normalized_query=cleaned,
+            components=components,
+            versions=versions,
+            symptoms=symptoms,
+            entities=entities,
+        )
+
+    @staticmethod
+    def _preserves_technical_tokens(original: str, normalized: str) -> bool:
+        tokens = re.findall(
+            r"`[^`]+`|\bCVE-\d{4}-\d+\b|\bv?\d+\.\d+(?:\.\d+)?\b|"
+            r"\bCrashLoopBackOff\b|\b[A-Za-z][A-Za-z0-9]+Error\b|#\d+",
+            original,
+            re.I,
+        )
+        return all(token.lower() in normalized.lower() for token in tokens)
+
+    @classmethod
+    def _normalization_from_state(cls, state: IncidentState) -> NormalizedQuery:
+        version = state.get("kubernetes_version")
+        return NormalizedQuery(
+            normalized_query=state["normalized_query"],
+            components=state.get("extracted_components", []),
+            versions=[version] if version else [],
+            symptoms=[],
+            entities=state.get("entities", []),
+        )
+
+    @classmethod
+    def _deterministic_intent(
+        cls, query: str
+    ) -> IntentClassification | None:
+        normalized = " ".join(query.lower().split())
+        if normalized in cls.GENERIC_DESCRIPTIONS or normalized in {
+            "help",
+            "it failed",
+        }:
+            return IntentClassification(
+                intent="NEEDS_CLARIFICATION",
+                confidence=0.99,
+                reasoning="The query does not identify a concrete question or symptom",
+            )
+        if re.search(
+            r"\b(most common|how many|count|top\s+\d*|which components?|"
+            r"associated with|affect both|most reported|group by|trend)\b",
+            normalized,
+        ):
+            return IntentClassification(
+                intent="GRAPH_ANALYTICS",
+                confidence=0.98,
+                reasoning="The query requests aggregation or graph relationships",
+            )
+        if re.match(r"^(what does|what is|how does|explain|describe)\b", normalized):
+            return IntentClassification(
+                intent="GENERAL_KUBERNETES_QUESTION",
+                confidence=0.97,
+                reasoning="The query asks for conceptual Kubernetes knowledge",
+            )
+        if re.match(r"^why do(?:es)?\b", normalized) and not re.search(
+            r"\b(my|our|after|started|suddenly)\b", normalized
+        ):
+            return IntentClassification(
+                intent="GENERAL_KUBERNETES_QUESTION",
+                confidence=0.9,
+                reasoning="The query asks for a general mechanism",
+            )
+        if re.search(
+            r"\b(my|our|started|after|upgrade|upgrading|crash(?:es|ed|ing)?|"
+            r"failing|failed|error|stuck|pending|restart(?:s|ed|ing)?)\b",
+            normalized,
+        ):
+            return IntentClassification(
+                intent="INCIDENT_TROUBLESHOOTING",
+                confidence=0.95,
+                reasoning="The query describes a concrete observed failure",
+            )
+        return None
+
+    @staticmethod
+    def _format_graph_results(rows: list[dict[str, Any]]) -> str:
+        if not rows:
+            return "The knowledge graph returned no matching results."
+        return "Graph results:\n" + "\n".join(
+            "- " + ", ".join(f"{key}: {value}" for key, value in row.items())
+            for row in rows
+        )
+
     GENERIC_DESCRIPTIONS = {
         "not working",
         "broken",

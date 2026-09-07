@@ -6,6 +6,13 @@ a local Neo4j graph loader, semantic issue search, and an evidence-grounded
 incident-analysis API. It does not yet include a frontend or Kubernetes
 deployment controller; local Kubernetes manifests are provided under `k8s/`.
 
+The shared LangGraph workflow also exposes a Kubernetes knowledge endpoint. It
+normalizes each query, classifies it as incident troubleshooting, graph
+analytics, general knowledge, or needing clarification, and preserves the
+existing incident vector-retrieval and reranking path. Graph analytics uses
+validated, parameterized, read-only Cypher. General conceptual answers fail
+closed until a documentation retrieval source is configured.
+
 ## Prerequisites
 
 - Python 3.11
@@ -104,6 +111,19 @@ curl -X POST http://127.0.0.1:8000/api/incidents/demo-thread-1/resume \
   -H 'Content-Type: application/json' \
   -d '{"answer":"The garbage collector repeatedly processes objects with valid owners on Kubernetes v1.36.2"}'
 ```
+
+Query the routed Kubernetes knowledge assistant:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/knowledge/query \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"What are the most common kubelet issues in v1.35?","thread_id":"knowledge-demo-1"}'
+```
+
+The response includes the selected high-level `intent` and the final workflow
+`route`. Generated Cypher is executed only after deterministic schema,
+parameter, read-only-operation, complexity, `RETURN`, and `LIMIT` checks. A
+failed query is regenerated once and then rejected safely.
 
 Stop and remove the containers and network without deleting the existing named
 Neo4j volume:
