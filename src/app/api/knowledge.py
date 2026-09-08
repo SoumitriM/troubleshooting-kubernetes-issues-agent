@@ -5,8 +5,14 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, status
+from langgraph.types import Command
 
-from app.api.models import KnowledgeQueryRequest, KnowledgeQueryResponse
+from app.api.incidents import THREAD_ID_PATTERN
+from app.api.models import (
+    IncidentResumeRequest,
+    KnowledgeQueryRequest,
+    KnowledgeQueryResponse,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -63,7 +69,60 @@ async def query_knowledge(
     except HTTPException:
         raise
     except Exception:
-        LOGGER.error("Kubernetes knowledge query failed")
+        LOGGER.exception("Kubernetes knowledge query failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Kubernetes knowledge service is temporarily unavailable",
+        ) from None
+
+
+@router.post("/{thread_id}/resume", response_model=KnowledgeQueryResponse)
+async def resume_knowledge(
+    thread_id: str, payload: IncidentResumeRequest, request: Request
+) -> KnowledgeQueryResponse:
+    """Continue a checkpointed knowledge query that requested clarification."""
+
+    if not THREAD_ID_PATTERN.fullmatch(thread_id):
+        raise HTTPException(status_code=422, detail="Invalid thread_id")
+    workflow = getattr(request.app.state, "incident_workflow", None)
+    if workflow is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Kubernetes knowledge service is temporarily unavailable",
+        )
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        snapshot = await workflow.aget_state(config)
+        if not snapshot.values or not snapshot.next:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conversation was not found or is not awaiting clarification",
+            )
+        result: dict[str, Any] = await workflow.ainvoke(
+            Command(resume=payload.answer), config
+        )
+        interruptions = result.get("__interrupt__") or ()
+        if interruptions:
+            return KnowledgeQueryResponse(
+                thread_id=thread_id,
+                status="needs_clarification",
+                intent=result.get("intent", "NEEDS_CLARIFICATION"),
+                route="request_clarification",
+                answer=interruptions[0].value["question"],
+                citations=[],
+            )
+        return KnowledgeQueryResponse(
+            thread_id=thread_id,
+            status="completed",
+            intent=result["intent"],
+            route=result["route"],
+            answer=result["answer"],
+            citations=result.get("citations", []),
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        LOGGER.exception("Kubernetes knowledge clarification failed")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Kubernetes knowledge service is temporarily unavailable",

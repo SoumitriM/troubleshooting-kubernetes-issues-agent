@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesage-frontend
+  namespace: incident-ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubesage-frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubesage-frontend
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: frontend
+          image: incident-resolution-ai-frontend:latest
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: runtime
+              mountPath: /tmp
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: runtime
+          emptyDir: {}

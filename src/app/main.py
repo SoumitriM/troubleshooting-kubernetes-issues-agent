@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from neo4j import Driver, GraphDatabase
@@ -115,6 +115,17 @@ def create_app(
         """Report whether the API process is healthy."""
 
         return {"status": "healthy"}
+
+    @application.get("/ready")
+    def ready() -> dict[str, str]:
+        """Report whether request-serving dependencies initialized successfully."""
+
+        if getattr(application.state, "incident_workflow", None) is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Application dependencies are not ready",
+            )
+        return {"status": "ready"}
 
     return application
 

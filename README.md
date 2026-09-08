@@ -55,6 +55,17 @@ uvicorn app.main:app --reload
 
 The health endpoint is available at `http://127.0.0.1:8000/health`.
 
+Run the React frontend during development in a second terminal:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Vite serves the UI at `http://127.0.0.1:5173` and proxies `/api` requests to
+the FastAPI process on port 8000.
+
 ## Docker Compose
 
 Copy `.env.example` to `.env` and configure the Neo4j credentials and FH Genie
@@ -137,12 +148,13 @@ the Neo4j data volume.
 
 ## Kubernetes on Docker Desktop
 
-The manifests in `k8s/` deploy one FastAPI pod and one Neo4j StatefulSet into
-the `incident-ai` namespace. The app image is local-only, uses
-`imagePullPolicy: Never`, and must be named `incident-resolution-ai-app:latest`:
+The manifests in `k8s/` deploy the React frontend, one FastAPI pod, and one
+Neo4j StatefulSet into the `incident-ai` namespace. The images are local-only
+and use `imagePullPolicy: Never`:
 
 ```bash
 docker build -t incident-resolution-ai-app:latest .
+docker build -t incident-resolution-ai-frontend:latest frontend
 ```
 
 Enable Kubernetes in Docker Desktop, then update the non-secret
@@ -176,13 +188,25 @@ The application connects to `neo4j://neo4j:7687`. Neo4j data and
 Deployment is fixed at one replica with a `Recreate` strategy because the local
 SQLite checkpointer cannot safely be shared across replicas.
 
-Wait for both workloads and verify their services and claims:
+Wait for all workloads and verify their services and claims:
 
 ```bash
 kubectl -n incident-ai rollout status statefulset/neo4j --timeout=5m
 kubectl -n incident-ai rollout status deployment/incident-resolution-ai --timeout=10m
+kubectl -n incident-ai rollout status deployment/kubesage-frontend --timeout=5m
 kubectl -n incident-ai get pods,services,persistentvolumeclaims
 ```
+
+The frontend service is a local `LoadBalancer`. On Docker Desktop, open
+`http://localhost`. If it does not receive an external address, use:
+
+```bash
+kubectl -n incident-ai port-forward service/kubesage-frontend 8080:80
+```
+
+Then open `http://127.0.0.1:8080`. Nginx serves the React application and
+proxies `/api` to the internal FastAPI service, so the backend remains private
+inside the cluster and the browser needs no CORS configuration.
 
 Forward the API locally and verify its health and incident endpoint:
 

@@ -8,3 +8,5 @@ resources:
   - 05-neo4j-statefulset.yaml
   - 06-app-service.yaml
   - 07-app-deployment.yaml
+  - 08-frontend-service.yaml
+  - 09-frontend-deployment.yaml

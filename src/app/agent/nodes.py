@@ -13,7 +13,7 @@ from app.agent.state import (
     QueryAnalysis,
     Route,
 )
-from app.enrichment.fh_genie_client import EnrichmentResponseError, FHGenieClient
+from app.enrichment.fh_genie_client import FHGenieClient
 from app.graph.analytics import GraphAnalyticsRepository
 from app.graph.cypher_validation import CypherValidator
 from app.retrieval.graph_retriever import GraphRetriever
@@ -52,7 +52,15 @@ class IncidentNodes:
         self._enable_interrupts = enable_interrupts
 
     def normalize_query(self, state: IncidentState) -> dict[str, Any]:
-        query = state.get("original_query") or state["user_query"]
+        original_query = state.get("original_query") or state["user_query"]
+        history = list(state.get("clarification_history", []))
+        query = "\n".join(
+            [original_query]
+            + [
+                f"Clarification {index}: {answer}"
+                for index, answer in enumerate(history, 1)
+            ]
+        )
         normalized = self._deterministic_normalization(query)
         model_normalizer = getattr(self._fh_genie, "normalize_query", None)
         if model_normalizer is not None:
@@ -60,10 +68,10 @@ class IncidentNodes:
                 candidate = model_normalizer(query)
                 if self._preserves_technical_tokens(query, candidate.normalized_query):
                     normalized = candidate
-            except (EnrichmentResponseError, ValueError, AttributeError):
+            except Exception:
                 LOGGER.warning("Query normalization model output was invalid")
         return {
-            "original_query": query,
+            "original_query": original_query,
             "user_query": normalized.normalized_query,
             "normalized_query": normalized.normalized_query,
             "extracted_components": normalized.components,
@@ -84,13 +92,15 @@ class IncidentNodes:
 
     def classify_intent(self, state: IncidentState) -> dict[str, Any]:
         query = state["normalized_query"]
-        decision = self._deterministic_intent(query)
+        history = state.get("clarification_history", [])
+        routing_query = history[-1] if history else query
+        decision = self._deterministic_intent(routing_query)
         if decision is None:
             classifier = getattr(self._fh_genie, "classify_query", None)
             if classifier is not None:
                 try:
                     decision = classifier(self._normalization_from_state(state))
-                except (EnrichmentResponseError, ValueError, AttributeError):
+                except Exception:
                     LOGGER.warning("Intent classifier returned invalid output")
         if decision is None:
             decision = IntentClassification(
@@ -124,7 +134,7 @@ class IncidentNodes:
                 "cypher_explanation": generated.explanation,
                 "cypher_attempt_count": attempt,
             }
-        except (EnrichmentResponseError, ValueError, AttributeError):
+        except Exception:
             LOGGER.warning("Cypher generation failed attempt=%d", attempt)
             return {
                 "generated_cypher": "",
@@ -215,13 +225,7 @@ class IncidentNodes:
         original_query = state.get("original_query") or state["user_query"]
         normalized_query = state.get("normalized_query") or original_query
         history = list(state.get("clarification_history", []))
-        analysis_query = "\n".join(
-            [normalized_query]
-            + [
-                f"Clarification {index}: {answer}"
-                for index, answer in enumerate(history, 1)
-            ]
-        )
+        analysis_query = normalized_query
         facts = self._fh_genie.enrich(analysis_query, None)
         symptom = facts.symptom
         specific_symptom = bool(symptom and not self._is_generic(symptom))

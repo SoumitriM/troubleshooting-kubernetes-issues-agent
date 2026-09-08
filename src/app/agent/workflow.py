@@ -76,7 +76,7 @@ def build_workflow(
     graph.add_conditional_edges(
         "request_clarification",
         route_after_clarification,
-        {"analyze_incident": "analyze_incident", "end": END},
+        {"normalize_query": "normalize_query", "end": END},
     )
     return graph.compile(checkpointer=checkpointer)
 
@@ -108,4 +108,4 @@ def route_after_analysis(state: IncidentState) -> str:
 def route_after_clarification(state: IncidentState) -> str:
     if state.get("clarification_exhausted") or state.get("answer"):
         return "end"
-    return "analyze_incident"
+    return "normalize_query"

@@ -19,7 +19,8 @@ def test_app_deployment_is_single_replica_local_and_non_root() -> None:
     assert "enableServiceLinks: false" in deployment
     assert "runAsNonRoot: true" in deployment
     assert "runAsUser: 1000" in deployment
-    assert deployment.count("path: /health") == 2
+    assert deployment.count("path: /ready") == 1
+    assert deployment.count("path: /health") == 1
     assert "claimName: langgraph-checkpoints" in deployment
 
 
@@ -45,3 +46,22 @@ def test_secret_template_contains_only_explicit_placeholders() -> None:
     assert "replace-with-neo4j-password" in secret
     assert "02-secret.example.yaml" not in kustomization
     assert "kind: Secret" in secret
+
+
+def test_frontend_is_exposed_and_proxies_to_the_internal_api() -> None:
+    deployment = manifest("09-frontend-deployment.yaml")
+    service = manifest("08-frontend-service.yaml")
+    kustomization = manifest("kustomization.yaml")
+    nginx = (ROOT / "frontend" / "nginx.conf").read_text(encoding="utf-8")
+
+    assert "image: incident-resolution-ai-frontend:latest" in deployment
+    assert "imagePullPolicy: Never" in deployment
+    assert "runAsNonRoot: true" in deployment
+    assert "readOnlyRootFilesystem: true" in deployment
+    assert deployment.count("path: /") == 2
+    assert "type: LoadBalancer" in service
+    assert "port: 80" in service
+    assert "08-frontend-service.yaml" in kustomization
+    assert "09-frontend-deployment.yaml" in kustomization
+    assert "proxy_pass http://incident-resolution-ai:8000" in nginx
+    assert "location = /ready" in nginx
