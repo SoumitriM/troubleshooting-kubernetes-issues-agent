@@ -14,6 +14,7 @@ from app.agent.state import (
     Route,
 )
 from app.enrichment.fh_genie_client import FHGenieClient
+from app.enrichment.models import IssueEnrichment
 from app.graph.analytics import GraphAnalyticsRepository
 from app.graph.cypher_validation import CypherValidator
 from app.retrieval.graph_retriever import GraphRetriever
@@ -74,6 +75,7 @@ class IncidentNodes:
             "original_query": original_query,
             "user_query": normalized.normalized_query,
             "normalized_query": normalized.normalized_query,
+            "normalized_symptoms": normalized.symptoms,
             "extracted_components": normalized.components,
             "kubernetes_version": normalized.versions[0] if normalized.versions else None,
             "entities": normalized.entities,
@@ -226,7 +228,22 @@ class IncidentNodes:
         normalized_query = state.get("normalized_query") or original_query
         history = list(state.get("clarification_history", []))
         analysis_query = normalized_query
-        facts = self._fh_genie.enrich(analysis_query, None)
+        try:
+            facts = self._fh_genie.enrich(analysis_query, None)
+        except Exception:
+            LOGGER.warning(
+                "Incident analysis model unavailable; using deterministic extraction"
+            )
+            facts = IssueEnrichment(
+                symptom=(state.get("normalized_symptoms") or [None])[0],
+                components=state.get("extracted_components", []),
+                kubernetes_versions=(
+                    [state["kubernetes_version"]]
+                    if state.get("kubernetes_version")
+                    else []
+                ),
+                error_messages=[],
+            )
         symptom = facts.symptom
         specific_symptom = bool(symptom and not self._is_generic(symptom))
         error_messages = [
@@ -391,14 +408,26 @@ class IncidentNodes:
 
     def generate_fix(self, state: IncidentState) -> dict[str, Any]:
         fixes = self._actionable_fixes(state.get("retrieved_context", {}))
-        generated = self._fh_genie.generate_grounded_fix(
-            state["user_query"],
-            fixes,
-        )
-        steps = "\n".join(f"- {step}" for step in generated.verified_steps)
+        try:
+            generated = self._fh_genie.generate_grounded_fix(
+                state["user_query"],
+                fixes,
+            )
+            answer = generated.answer
+            verified_steps = generated.verified_steps
+            citations = generated.citations
+        except Exception:
+            LOGGER.warning(
+                "Grounded answer model unavailable; rendering verified evidence"
+            )
+            fallback = fixes[0]
+            answer = fallback["resolution_summary"]
+            verified_steps = fallback["verified_steps"]
+            citations = fallback["evidence_urls"]
+        steps = "\n".join(f"- {step}" for step in verified_steps)
         return {
-            "answer": f"{generated.answer}\nVerified steps:\n{steps}",
-            "citations": generated.citations,
+            "answer": f"{answer}\nVerified steps:\n{steps}",
+            "citations": citations,
         }
 
     def generate_findings(self, state: IncidentState) -> dict[str, Any]:

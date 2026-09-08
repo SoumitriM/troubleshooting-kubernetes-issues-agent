@@ -75,6 +75,7 @@ class IncidentState(TypedDict, total=False):
     debug: bool
     query_analysis: QueryAnalysis
     normalized_query: str
+    normalized_symptoms: list[str]
     intent: Intent
     intent_confidence: float
     intent_reasoning: str

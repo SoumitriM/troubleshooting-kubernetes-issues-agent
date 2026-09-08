@@ -68,3 +68,22 @@ def test_latest_clarification_controls_reclassification() -> None:
     )
     state["clarification_history"] = ["What does kubelet do?"]
     assert nodes.classify_intent(state)["intent"] == "GENERAL_KUBERNETES_QUESTION"
+
+
+def test_incident_analysis_survives_model_outage() -> None:
+    nodes = IncidentNodes(  # type: ignore[arg-type]
+        UnavailableModel(), None, AgentSettings(_env_file=None)
+    )
+    state = nodes.normalize_query(
+        {
+            "user_query": (
+                "My kubelet pod enters CrashLoopBackOff after upgrading to v1.35"
+            )
+        }
+    )
+    result = nodes.analyze_incident(state)
+
+    assert result["has_sufficient_details"] is True
+    assert "kubelet" in result["extracted_components"]
+    assert result["kubernetes_version"] == "v1.35"
+    assert result["error_messages"] == ["CrashLoopBackOff"]
