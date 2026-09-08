@@ -7,6 +7,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.agent.state import (
+    CypherGeneration,
     IncidentState,
     IntentClassification,
     NormalizedQuery,
@@ -124,12 +125,21 @@ class IncidentNodes:
     def generate_cypher(self, state: IncidentState) -> dict[str, Any]:
         attempt = state.get("cypher_attempt_count", 0) + 1
         try:
-            generated = self._fh_genie.generate_cypher(
-                self._normalization_from_state(state),
-                intent=state["intent"],
-                validation_errors=state.get("cypher_validation_errors", []),
+            normalized = self._normalization_from_state(state)
+            generated = self._deterministic_cypher(normalized)
+            source = "deterministic"
+            if generated is None:
+                source = "model"
+                generated = self._fh_genie.generate_cypher(
+                    normalized,
+                    intent=state["intent"],
+                    validation_errors=state.get("cypher_validation_errors", []),
+                )
+            LOGGER.info(
+                "Generated Cypher attempt=%d source=%s",
+                attempt,
+                source,
             )
-            LOGGER.info("Generated Cypher attempt=%d", attempt)
             return {
                 "generated_cypher": generated.cypher,
                 "cypher_parameters": generated.parameters,
@@ -866,6 +876,89 @@ class IncidentNodes:
             "- " + ", ".join(f"{key}: {value}" for key, value in row.items())
             for row in rows
         )
+
+    @staticmethod
+    def _deterministic_cypher(
+        normalized: NormalizedQuery,
+    ) -> CypherGeneration | None:
+        query = normalized.normalized_query.lower()
+        components = [
+            component.lower()
+            for component in normalized.components
+            if component.lower() not in {"pod", "pods"}
+        ]
+        versions = normalized.versions
+
+        if re.search(r"\b(which components?|most reported issues)\b", query):
+            return CypherGeneration(
+                cypher=(
+                    "MATCH (i:Issue)-[:AFFECTS_COMPONENT]->(c:Component) "
+                    "RETURN c.name AS component, count(DISTINCT i) AS issue_count "
+                    "ORDER BY issue_count DESC LIMIT 20"
+                ),
+                parameters={},
+                explanation="Count reported issues by component",
+            )
+
+        if "affect both" in query and len(components) >= 2:
+            selected = list(dict.fromkeys(components))
+            return CypherGeneration(
+                cypher=(
+                    "MATCH (i:Issue)-[:AFFECTS_COMPONENT]->(c:Component) "
+                    "WHERE toLower(c.name) IN $components "
+                    "WITH i, count(DISTINCT toLower(c.name)) AS matched_components "
+                    "WHERE matched_components = $component_count "
+                    "RETURN i.issue_number AS issue_number, i.title AS title, "
+                    "i.html_url AS url ORDER BY issue_number DESC LIMIT 20"
+                ),
+                parameters={
+                    "components": selected,
+                    "component_count": len(selected),
+                },
+                explanation="Find issues linked to every requested component",
+            )
+
+        if re.search(r"\b(associated with|certificate failures?)\b", query):
+            term = "certificate" if "certificate" in query else "failure"
+            return CypherGeneration(
+                cypher=(
+                    "MATCH (i:Issue)-[:AFFECTS_COMPONENT]->(c:Component) "
+                    "OPTIONAL MATCH (i)-[:HAS_ERROR]->(e:ErrorMessage) "
+                    "WHERE toLower(coalesce(i.symptom, '')) CONTAINS $term "
+                    "OR toLower(coalesce(i.summary, '')) CONTAINS $term "
+                    "OR toLower(coalesce(e.message, '')) CONTAINS $term "
+                    "RETURN c.name AS component, count(DISTINCT i) AS issue_count "
+                    "ORDER BY issue_count DESC LIMIT 20"
+                ),
+                parameters={"term": term},
+                explanation="Count components linked to matching incident text",
+            )
+
+        if "most common" in query and components:
+            filters = ["toLower(c.name) = $component"]
+            parameters: dict[str, Any] = {"component": components[0]}
+            version_match = ""
+            if versions:
+                version_match = (
+                    "MATCH (i)-[:REPORTED_IN_VERSION]->(v:KubernetesVersion) "
+                )
+                filters.append("v.version = $version")
+                parameters["version"] = versions[0]
+            return CypherGeneration(
+                cypher=(
+                    "MATCH (i:Issue)-[:AFFECTS_COMPONENT]->(c:Component) "
+                    + version_match
+                    + "WHERE "
+                    + " AND ".join(filters)
+                    + " RETURN i.issue_number AS issue_number, i.title AS title, "
+                    "i.summary AS summary, i.html_url AS url, "
+                    "coalesce(i.comments_count, 0) AS discussion_count "
+                    "ORDER BY discussion_count DESC LIMIT 20"
+                ),
+                parameters=parameters,
+                explanation="List the most discussed matching issues",
+            )
+        return None
 
     GENERIC_DESCRIPTIONS = {
         "not working",
