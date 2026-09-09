@@ -32,3 +32,6 @@ data/checkpoints.sqlite
 data/checkpoints.sqlite-shm
 data/checkpoints.sqlite-wal
 data/checkpoints.sqlite-journal
+data/kubernetes_docs.sqlite
+data/kubernetes_docs.sqlite-*
+data/kubernetes-website/

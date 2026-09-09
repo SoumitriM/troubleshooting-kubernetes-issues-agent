@@ -22,6 +22,7 @@ from app.graph.loader import GraphSettings
 from app.graph.analytics import GraphAnalyticsRepository
 from app.retrieval.embeddings import IssueEmbedder
 from app.retrieval.graph_retriever import GraphRetriever
+from app.documentation.store import DocumentationStore, KubernetesDocsRetriever
 
 
 LOGGER = logging.getLogger(__name__)
@@ -46,12 +47,20 @@ def build_agent_resources(checkpointer: Any | None = None) -> AgentResources:
     )
     try:
         driver.verify_connectivity()
+        embedder = IssueEmbedder()
+        agent_settings = AgentSettings()
         workflow = build_workflow(
             IncidentNodes(
                 FHGenieClient(EnrichmentSettings()),
-                GraphRetriever(driver, IssueEmbedder()),
-                AgentSettings(),
+                GraphRetriever(driver, embedder),
+                agent_settings,
                 analytics_repository=GraphAnalyticsRepository(driver),
+                documentation_retriever=KubernetesDocsRetriever(
+                    DocumentationStore(
+                        agent_settings.documentation_index_path,
+                        embedder,
+                    )
+                ),
                 enable_interrupts=checkpointer is not None,
             ),
             checkpointer=checkpointer,

@@ -1,17 +1,18 @@
 # AI Incident Resolution Platform
 
 Initial FastAPI service for an AI-assisted incident-resolution platform. It
-provides a health endpoint, GitHub issue ingestion, FH Genie issue enrichment,
-a local Neo4j graph loader, semantic issue search, and an evidence-grounded
-incident-analysis API. It does not yet include a frontend or Kubernetes
-deployment controller; local Kubernetes manifests are provided under `k8s/`.
+provides a React frontend, health endpoint, GitHub issue ingestion, FH Genie
+issue enrichment, a local Neo4j graph loader, semantic issue and official
+Kubernetes documentation search, and an evidence-grounded incident-analysis
+API. Local Kubernetes manifests are provided under `k8s/`.
 
 The shared LangGraph workflow also exposes a Kubernetes knowledge endpoint. It
 normalizes each query, classifies it as incident troubleshooting, graph
 analytics, general knowledge, or needing clarification, and preserves the
 existing incident vector-retrieval and reranking path. Graph analytics uses
-validated, parameterized, read-only Cypher. General conceptual answers fail
-closed until a documentation retrieval source is configured.
+validated, parameterized, read-only Cypher. General conceptual answers use a
+separate local vector index built only from the official English Kubernetes
+documentation and include links to the retrieved source pages.
 
 ## Prerequisites
 
@@ -54,6 +55,40 @@ uvicorn app.main:app --reload
 ```
 
 The health endpoint is available at `http://127.0.0.1:8000/health`.
+
+## Official Kubernetes documentation index
+
+Fetch the supported English sections (`concepts`, `tasks`, `tutorials`, and
+`reference`) from the upstream `kubernetes/website` repository, then build the
+local index:
+
+```bash
+python -m app.documentation.cli fetch
+python -m app.documentation.cli index
+```
+
+The sparse source checkout is stored in `data/kubernetes-website`, and the
+separate documentation index is stored in `data/kubernetes_docs.sqlite`. Both
+are generated artifacts excluded from Git. Indexing is incremental and safe to
+repeat after fetching upstream updates.
+
+Inspect retrieval without starting the API:
+
+```bash
+python -m app.documentation.cli search \
+  --query "What does the kubelet do?" --limit 5
+```
+
+Useful end-to-end questions include:
+
+- `What does the kubelet do?`
+- `How do Deployments perform rolling updates?`
+- `What happens when a Pod fails a readiness probe?`
+- `How does Kubernetes DNS service discovery work?`
+- `What is the difference between a ConfigMap and a Secret?`
+
+If the index has not been built or no useful documentation is available, the
+assistant returns a safe unavailable response instead of inventing an answer.
 
 Run the React frontend during development in a second terminal:
 
@@ -181,6 +216,19 @@ Deploy the non-secret resources:
 
 ```bash
 kubectl apply -k k8s
+```
+
+Copy the generated documentation index to the application's persistent volume
+after the first pod is running, then restart the deployment so the API opens the
+completed file:
+
+```bash
+APP_POD=$(kubectl -n incident-ai get pod \
+  -l app.kubernetes.io/name=incident-resolution-ai \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl -n incident-ai cp data/kubernetes_docs.sqlite \
+  "$APP_POD:/app/data/kubernetes_docs.sqlite"
+kubectl -n incident-ai rollout restart deployment/incident-resolution-ai
 ```
 
 The application connects to `neo4j://neo4j:7687`. Neo4j data and

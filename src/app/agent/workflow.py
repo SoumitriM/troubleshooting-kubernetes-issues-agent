@@ -26,7 +26,10 @@ def build_workflow(
     graph.add_node("execute_neo4j", nodes.execute_neo4j)
     graph.add_node("answer_from_graph", nodes.answer_from_graph)
     graph.add_node("graph_query_failed", nodes.graph_query_failed)
-    graph.add_node("answer_general_question", nodes.answer_general_question)
+    graph.add_node("retrieve_kubernetes_docs", nodes.retrieve_kubernetes_docs)
+    graph.add_node(
+        "answer_from_kubernetes_docs", nodes.answer_from_kubernetes_docs
+    )
     graph.add_edge(START, "normalize_query")
     graph.add_edge("normalize_query", "classify_intent")
     graph.add_conditional_edges(
@@ -35,7 +38,7 @@ def build_workflow(
         {
             "INCIDENT_TROUBLESHOOTING": "analyze_incident",
             "GRAPH_ANALYTICS": "generate_cypher",
-            "GENERAL_KUBERNETES_QUESTION": "answer_general_question",
+            "GENERAL_KUBERNETES_QUESTION": "retrieve_kubernetes_docs",
             "NEEDS_CLARIFICATION": "request_clarification",
         },
     )
@@ -72,7 +75,8 @@ def build_workflow(
     graph.add_edge("execute_neo4j", "answer_from_graph")
     graph.add_edge("answer_from_graph", END)
     graph.add_edge("graph_query_failed", END)
-    graph.add_edge("answer_general_question", END)
+    graph.add_edge("retrieve_kubernetes_docs", "answer_from_kubernetes_docs")
+    graph.add_edge("answer_from_kubernetes_docs", END)
     graph.add_conditional_edges(
         "request_clarification",
         route_after_clarification,

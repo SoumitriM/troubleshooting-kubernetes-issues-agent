@@ -228,3 +228,34 @@ def test_generate_grounded_fix_rejects_invented_summary() -> None:
         )
 
     assert api.chat.completions.create.call_count == 2
+
+
+def test_documentation_answer_accepts_only_retrieved_citation() -> None:
+    api = MagicMock()
+    source = "https://kubernetes.io/docs/concepts/overview/components/"
+    api.chat.completions.create.return_value = response(
+        '{"answer":"The kubelet runs on each node.",'
+        f'"citations":["{source}"]}}'
+    )
+    answer = FHGenieClient(settings(), client=api).answer_documentation_question(
+        "What does kubelet do?",
+        [{"text": "The kubelet runs on each node.", "source_url": source}],
+    )
+    assert answer.citations == [source]
+
+
+def test_documentation_answer_rejects_invented_citation() -> None:
+    api = MagicMock()
+    api.chat.completions.create.return_value = response(
+        '{"answer":"Invented","citations":["https://example.invalid/docs"]}'
+    )
+    with pytest.raises(
+        EnrichmentResponseError, match="unsupported citation"
+    ):
+        FHGenieClient(settings(), client=api).answer_documentation_question(
+            "What does kubelet do?",
+            [{
+                "text": "The kubelet runs on each node.",
+                "source_url": "https://kubernetes.io/docs/concepts/overview/components/",
+            }],
+        )

@@ -85,6 +85,7 @@ class IncidentState(TypedDict, total=False):
     cypher_explanation: str
     cypher_validation_errors: list[str]
     graph_results: list[dict[str, Any]]
+    documentation_results: list[dict[str, Any]]
     cypher_attempt_count: int
     extracted_symptom: str | None
     extracted_components: list[str]

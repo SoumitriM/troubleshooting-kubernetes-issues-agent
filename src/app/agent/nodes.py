@@ -1,5 +1,6 @@
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from langgraph.types import interrupt
@@ -16,6 +17,7 @@ from app.agent.state import (
 )
 from app.enrichment.fh_genie_client import FHGenieClient
 from app.enrichment.models import IssueEnrichment
+from app.documentation.store import KubernetesDocsRetriever
 from app.graph.analytics import GraphAnalyticsRepository
 from app.graph.cypher_validation import CypherValidator
 from app.retrieval.graph_retriever import GraphRetriever
@@ -31,6 +33,7 @@ class AgentSettings(BaseSettings):
 
     agent_relevance_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
     agent_actionable_fix_threshold: float = Field(default=0.65, ge=0.0, le=1.0)
+    documentation_index_path: Path = Path("data/kubernetes_docs.sqlite")
 
 
 class IncidentNodes:
@@ -43,6 +46,7 @@ class IncidentNodes:
         settings: AgentSettings,
         *,
         analytics_repository: GraphAnalyticsRepository | None = None,
+        documentation_retriever: KubernetesDocsRetriever | None = None,
         cypher_validator: CypherValidator | None = None,
         enable_interrupts: bool = False,
     ) -> None:
@@ -50,6 +54,7 @@ class IncidentNodes:
         self._retriever = retriever
         self._settings = settings
         self._analytics_repository = analytics_repository
+        self._documentation_retriever = documentation_retriever
         self._cypher_validator = cypher_validator or CypherValidator()
         self._enable_interrupts = enable_interrupts
 
@@ -222,16 +227,60 @@ class IncidentNodes:
             "route": "answer_from_graph",
         }
 
-    @staticmethod
-    def answer_general_question(state: IncidentState) -> dict[str, Any]:
+    def retrieve_kubernetes_docs(self, state: IncidentState) -> dict[str, Any]:
+        if self._documentation_retriever is None:
+            return {"documentation_results": []}
+        try:
+            results = self._documentation_retriever.search(
+                state["normalized_query"], limit=5
+            )
+            LOGGER.info("Documentation retrieval returned chunks=%d", len(results))
+            return {"documentation_results": results}
+        except Exception:
+            LOGGER.exception("Documentation retrieval failed")
+            return {"documentation_results": []}
+
+    def answer_from_kubernetes_docs(self, state: IncidentState) -> dict[str, Any]:
+        chunks = state.get("documentation_results", [])
+        if not chunks:
+            return {
+                "answer": (
+                    "I could not find relevant content in the indexed official "
+                    "Kubernetes documentation."
+                ),
+                "citations": [],
+                "route": "general_answer",
+            }
+        allowed_urls = {chunk["source_url"] for chunk in chunks}
+        try:
+            generated = self._fh_genie.answer_documentation_question(
+                state["normalized_query"], chunks
+            )
+            if not set(generated.citations).issubset(allowed_urls):
+                raise ValueError("documentation answer contained unsupported citation")
+            answer = generated.answer
+            citations = generated.citations
+        except Exception:
+            LOGGER.warning(
+                "Documentation answer model unavailable; using extractive answer"
+            )
+            best = chunks[0]
+            answer = self._extractive_documentation_answer(best)
+            citations = [best["source_url"]]
         return {
-            "answer": (
-                "General Kubernetes documentation retrieval is not configured yet. "
-                "I will not infer a conceptual answer from incident records."
-            ),
-            "citations": [],
+            "answer": answer,
+            "citations": citations,
             "route": "general_answer",
         }
+
+    @staticmethod
+    def _extractive_documentation_answer(chunk: dict[str, Any]) -> str:
+        text = re.sub(r"^#{1,6}\s+.*$", "", chunk["text"], flags=re.MULTILINE)
+        paragraphs = [item.strip() for item in re.split(r"\n{2,}", text) if item.strip()]
+        excerpt = "\n\n".join(paragraphs[:2]).strip()
+        if len(excerpt) > 900:
+            excerpt = excerpt[:900].rsplit(" ", 1)[0] + "…"
+        return excerpt or "The retrieved documentation did not contain explanatory text."
 
     def analyze_incident(self, state: IncidentState) -> dict[str, Any]:
         original_query = state.get("original_query") or state["user_query"]
@@ -842,7 +891,10 @@ class IncidentNodes:
                 confidence=0.98,
                 reasoning="The query requests aggregation or graph relationships",
             )
-        if re.match(r"^(what does|what is|how does|explain|describe)\b", normalized):
+        if re.match(
+            r"^(what does|what is|what happens when|how (?:does|do)|explain|describe)\b",
+            normalized,
+        ):
             return IntentClassification(
                 intent="GENERAL_KUBERNETES_QUESTION",
                 confidence=0.97,

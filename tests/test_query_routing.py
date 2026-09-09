@@ -1,3 +1,5 @@
+import pytest
+
 from app.agent.nodes import AgentSettings, IncidentNodes
 
 
@@ -87,3 +89,31 @@ def test_incident_analysis_survives_model_outage() -> None:
     assert "kubelet" in result["extracted_components"]
     assert result["kubernetes_version"] == "v1.35"
     assert result["error_messages"] == ["CrashLoopBackOff"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "What does kubelet do?",
+        "What is kube-apiserver?",
+        "What is a Kubernetes Pod?",
+        "What is a Deployment?",
+        "How does a Service work?",
+        "What is a ConfigMap?",
+        "What is etcd used for in Kubernetes?",
+        "What is the difference between a Pod and a Deployment?",
+        "How does Kubernetes schedule a Pod?",
+        "How do Deployments perform rolling updates?",
+        "What happens when a kubelet stops working?",
+        "Explain Kubernetes Services",
+    ],
+)
+def test_basic_knowledge_queries_route_to_documentation(query: str) -> None:
+    assert classify(query) == "GENERAL_KUBERNETES_QUESTION"
+
+
+def test_concrete_kubelet_failure_stays_on_incident_path() -> None:
+    assert (
+        classify("My kubelet stopped working after an upgrade and pods are failing")
+        == "INCIDENT_TROUBLESHOOTING"
+    )
