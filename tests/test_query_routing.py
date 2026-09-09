@@ -1,119 +1,119 @@
 import pytest
 
 from app.agent.nodes import AgentSettings, IncidentNodes
+from app.agent.state import QueryUnderstanding
 
 
-class NoModelRouting:
-    pass
+class SemanticModel:
+    def __init__(self, analysis: QueryUnderstanding) -> None:
+        self.analysis = analysis
+        self.calls = 0
+
+    def analyze_query(self, query: str) -> QueryUnderstanding:
+        self.calls += 1
+        return self.analysis.model_copy(update={"normalized_query": query})
 
 
-class UnavailableModel:
-    def normalize_query(self, query):
-        raise ConnectionError("model endpoint unavailable")
-
-
-def classify(query: str) -> str:
-    nodes = IncidentNodes(  # type: ignore[arg-type]
-        NoModelRouting(), None, AgentSettings(_env_file=None)
+def understand(query: str, **updates):
+    analysis = QueryUnderstanding(
+        normalized_query=query,
+        intent=updates.pop("intent"),
+        intent_confidence=0.97,
+        reasoning="Semantic interpretation supplied by FH Genie",
+        **updates,
     )
-    normalized = nodes.normalize_query({"user_query": query})
-    return nodes.classify_intent(normalized)["intent"]
-
-
-def test_incident_query_routes_to_existing_troubleshooting_flow() -> None:
-    assert (
-        classify("My kubelet started crashing after upgrading to v1.35")
-        == "INCIDENT_TROUBLESHOOTING"
-    )
-
-
-def test_common_issues_query_routes_to_graph_analytics() -> None:
-    assert (
-        classify("What are the most common kubelet issues in v1.35?")
-        == "GRAPH_ANALYTICS"
-    )
-
-
-def test_component_count_query_routes_to_graph_analytics() -> None:
-    assert (
-        classify("Which components have the most reported issues?")
-        == "GRAPH_ANALYTICS"
-    )
-
-
-def test_conceptual_query_routes_to_general_knowledge() -> None:
-    assert classify("What does kubelet do?") == "GENERAL_KUBERNETES_QUESTION"
-
-
-def test_vague_query_fails_safe() -> None:
-    assert classify("Something is broken") == "NEEDS_CLARIFICATION"
-
-
-def test_obvious_route_survives_optional_model_outage() -> None:
-    nodes = IncidentNodes(  # type: ignore[arg-type]
-        UnavailableModel(), None, AgentSettings(_env_file=None)
-    )
-    normalized = nodes.normalize_query({"user_query": "What does kubelet do?"})
-    assert nodes.classify_intent(normalized)["intent"] == "GENERAL_KUBERNETES_QUESTION"
-
-
-def test_latest_clarification_controls_reclassification() -> None:
-    nodes = IncidentNodes(  # type: ignore[arg-type]
-        UnavailableModel(), None, AgentSettings(_env_file=None)
-    )
-    state = nodes.normalize_query(
-        {
-            "original_query": "Something is broken",
-            "user_query": "Something is broken",
-            "clarification_history": ["What does kubelet do?"],
-        }
-    )
-    state["clarification_history"] = ["What does kubelet do?"]
-    assert nodes.classify_intent(state)["intent"] == "GENERAL_KUBERNETES_QUESTION"
-
-
-def test_incident_analysis_survives_model_outage() -> None:
-    nodes = IncidentNodes(  # type: ignore[arg-type]
-        UnavailableModel(), None, AgentSettings(_env_file=None)
-    )
-    state = nodes.normalize_query(
-        {
-            "user_query": (
-                "My kubelet pod enters CrashLoopBackOff after upgrading to v1.35"
-            )
-        }
-    )
-    result = nodes.analyze_incident(state)
-
-    assert result["has_sufficient_details"] is True
-    assert "kubelet" in result["extracted_components"]
-    assert result["kubernetes_version"] == "v1.35"
-    assert result["error_messages"] == ["CrashLoopBackOff"]
+    model = SemanticModel(analysis)
+    result = IncidentNodes(  # type: ignore[arg-type]
+        model, None, AgentSettings(_env_file=None)
+    ).understand_query({"user_query": query})
+    assert model.calls == 1
+    return result
 
 
 @pytest.mark.parametrize(
     "query",
     [
-        "What does kubelet do?",
-        "What is kube-apiserver?",
-        "What is a Kubernetes Pod?",
-        "What is a Deployment?",
-        "How does a Service work?",
-        "What is a ConfigMap?",
-        "What is etcd used for in Kubernetes?",
-        "What is the difference between a Pod and a Deployment?",
-        "How does Kubernetes schedule a Pod?",
-        "How do Deployments perform rolling updates?",
-        "What happens when a kubelet stops working?",
-        "Explain Kubernetes Services",
+        "My kubelet keeps crashing after an upgrade.",
+        "My kubelet keeps dying after an upgrade.",
+        "The kubelet repeatedly terminates after upgrading.",
+        "After the upgrade the node agent keeps going down.",
     ],
 )
-def test_basic_knowledge_queries_route_to_documentation(query: str) -> None:
-    assert classify(query) == "GENERAL_KUBERNETES_QUESTION"
-
-
-def test_concrete_kubelet_failure_stays_on_incident_path() -> None:
-    assert (
-        classify("My kubelet stopped working after an upgrade and pods are failing")
-        == "INCIDENT_TROUBLESHOOTING"
+def test_semantic_incident_variations_route_identically(query: str) -> None:
+    result = understand(
+        query,
+        intent="INCIDENT_TROUBLESHOOTING",
+        components=["kubelet"],
+        symptoms=["kubelet repeatedly terminates"],
+        observed_behavior="kubelet repeatedly terminates after an upgrade",
+        has_concrete_incident=True,
     )
+    assert result["intent"] == "INCIDENT_TROUBLESHOOTING"
+    assert result["has_sufficient_details"] is True
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Which issues affect both kubelet and etcd?",
+        "Which issues involve both kubelet and etcd?",
+        "Show incidents connected to both kubelet and etcd.",
+        "Find issues shared by kubelet and etcd.",
+    ],
+)
+def test_semantic_relationship_variations_route_identically(query: str) -> None:
+    result = understand(
+        query,
+        intent="GRAPH_ANALYTICS",
+        components=["kubelet", "etcd"],
+        analytics_operation="RELATIONSHIP",
+        group_by="issue",
+    )
+    assert result["intent"] == "GRAPH_ANALYTICS"
+    assert result["query_understanding"].analytics_operation == "RELATIONSHIP"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "List the top 5 components by issue count.",
+        "Which five components occur most often?",
+        "Show me the five most frequently affected components.",
+        "Rank components by number of incidents and return five.",
+    ],
+)
+def test_semantic_top_n_variations_share_structured_operation(query: str) -> None:
+    result = understand(
+        query,
+        intent="GRAPH_ANALYTICS",
+        analytics_operation="TOP_N",
+        group_by="component",
+        limit=5,
+    )
+    analysis = result["query_understanding"]
+    assert analysis.analytics_operation == "TOP_N"
+    assert analysis.group_by == "component"
+    assert analysis.limit == 5
+
+
+def test_conceptual_query_routes_to_documentation() -> None:
+    result = understand(
+        "How does the scheduler decide where a Pod runs?",
+        intent="GENERAL_KUBERNETES_QUESTION",
+        components=["scheduler"],
+    )
+    assert result["intent"] == "GENERAL_KUBERNETES_QUESTION"
+
+
+def test_model_outage_fails_closed_without_regex_nlp() -> None:
+    class Unavailable:
+        def analyze_query(self, query):
+            raise ConnectionError("FH Genie unavailable")
+
+    result = IncidentNodes(  # type: ignore[arg-type]
+        Unavailable(), None, AgentSettings(_env_file=None)
+    ).understand_query({"user_query": "My kubelet keeps dying"})
+
+    assert result["intent"] == "NEEDS_CLARIFICATION"
+    assert result["intent_confidence"] == 0.0
+    assert "temporarily unavailable" in result["intent_reasoning"]

@@ -6,13 +6,16 @@ issue enrichment, a local Neo4j graph loader, semantic issue and official
 Kubernetes documentation search, and an evidence-grounded incident-analysis
 API. Local Kubernetes manifests are provided under `k8s/`.
 
-The shared LangGraph workflow also exposes a Kubernetes knowledge endpoint. It
-normalizes each query, classifies it as incident troubleshooting, graph
-analytics, general knowledge, or needing clarification, and preserves the
-existing incident vector-retrieval and reranking path. Graph analytics uses
-validated, parameterized, read-only Cypher. General conceptual answers use a
-separate local vector index built only from the official English Kubernetes
-documentation and include links to the retrieved source pages.
+The shared LangGraph workflow also exposes a Kubernetes knowledge endpoint. One
+validated FH Genie call produces the normalized query, intent, components,
+symptoms, errors, versions, incident sufficiency, and structured analytics
+operation reused throughout the graph. If that service is unavailable, semantic
+routing fails closed instead of recreating a keyword-based NLP engine. The
+existing incident evidence thresholds and citation safeguards remain
+deterministic. Graph analytics maps structured operations to validated,
+read-only Cypher templates. General conceptual answers use a separate local
+vector index built only from the official English Kubernetes documentation and
+include links to the retrieved source pages.
 
 ## Prerequisites
 

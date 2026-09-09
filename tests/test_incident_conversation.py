@@ -6,7 +6,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agent.checkpointing import strict_checkpoint_serializer
 from app.agent.nodes import AgentSettings, IncidentNodes
-from app.agent.state import QueryAnalysis
+from app.agent.state import QueryAnalysis, QueryUnderstanding
 from app.agent.workflow import build_workflow
 from app.enrichment.models import IssueEnrichment
 from app.main import AgentResources, create_app
@@ -25,6 +25,24 @@ class ConversationFHGenie:
                 kubernetes_versions=["v1.36.2"],
             )
         return IssueEnrichment(symptom="Kubernetes is not working", components=["kubelet"])
+
+    def analyze_query(self, query: str) -> QueryUnderstanding:
+        facts = self.enrich(query, None)
+        concrete = "garbage collector" in query.lower()
+        components = list(facts.components)
+        if concrete and "kubelet" in query.lower():
+            components.insert(0, "kubelet")
+        return QueryUnderstanding(
+            normalized_query=query,
+            intent=("INCIDENT_TROUBLESHOOTING" if concrete else "NEEDS_CLARIFICATION"),
+            intent_confidence=0.95,
+            components=components,
+            versions=facts.kubernetes_versions,
+            symptoms=[facts.symptom] if facts.symptom and concrete else [],
+            observed_behavior=facts.symptom if concrete else None,
+            has_concrete_incident=concrete,
+            reasoning="Test semantic analysis",
+        )
 
 
 class ConversationRetriever:
@@ -46,6 +64,7 @@ class ConversationRetriever:
                     "issue_number": 141382,
                     "title": "Garbage collector processes valid owners",
                     "summary": "Objects with valid owners are repeatedly processed",
+                    "symptom": "garbage collector repeatedly processes objects with valid owners",
                     "url": "https://github.com/kubernetes/kubernetes/issues/141382",
                     "score": 0.91,
                     "components": ["garbage collector"],

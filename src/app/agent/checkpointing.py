@@ -1,6 +1,6 @@
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
-from app.agent.state import QueryAnalysis
+from app.agent.state import QueryAnalysis, QueryUnderstanding
 
 
 def strict_checkpoint_serializer() -> JsonPlusSerializer:
@@ -8,5 +8,5 @@ def strict_checkpoint_serializer() -> JsonPlusSerializer:
 
     return JsonPlusSerializer(
         pickle_fallback=False,
-        allowed_msgpack_modules=(QueryAnalysis,),
+        allowed_msgpack_modules=(QueryAnalysis, QueryUnderstanding),
     )

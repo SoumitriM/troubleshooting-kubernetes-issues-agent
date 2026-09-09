@@ -10,6 +10,8 @@ Intent = Literal[
     "GENERAL_KUBERNETES_QUESTION",
     "NEEDS_CLARIFICATION",
 ]
+AnalyticsOperation = Literal["COUNT", "GROUP_BY", "TOP_N", "RELATIONSHIP", "LIST"]
+AnalyticsGroup = Literal["component", "version", "issue"]
 Route = Literal[
     "generate_fix",
     "generate_findings",
@@ -39,6 +41,27 @@ class IntentClassification(BaseModel):
     intent: Intent
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning: str = Field(min_length=1, max_length=300)
+
+
+class QueryUnderstanding(BaseModel):
+    """One model-produced semantic interpretation reused by every route."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    normalized_query: str = Field(min_length=1)
+    intent: Intent
+    intent_confidence: float = Field(ge=0.0, le=1.0)
+    components: list[str] = Field(default_factory=list)
+    versions: list[str] = Field(default_factory=list)
+    entities: list[str] = Field(default_factory=list)
+    symptoms: list[str] = Field(default_factory=list)
+    error_messages: list[str] = Field(default_factory=list)
+    observed_behavior: str | None = None
+    has_concrete_incident: bool = False
+    reasoning: str = Field(min_length=1, max_length=500)
+    analytics_operation: AnalyticsOperation | None = None
+    group_by: AnalyticsGroup | None = None
+    limit: int | None = Field(default=None, ge=1, le=100)
 
 
 class CypherGeneration(BaseModel):
@@ -74,6 +97,7 @@ class IncidentState(TypedDict, total=False):
     clarification_exhausted: bool
     debug: bool
     query_analysis: QueryAnalysis
+    query_understanding: QueryUnderstanding
     normalized_query: str
     normalized_symptoms: list[str]
     intent: Intent

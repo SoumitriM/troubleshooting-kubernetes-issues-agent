@@ -98,6 +98,50 @@ def test_api_key_is_secret_and_redacted() -> None:
     assert "test-secret" not in repr(configured)
 
 
+def test_analyze_query_uses_one_typed_temperature_zero_call() -> None:
+    api = MagicMock()
+    api.chat.completions.create.return_value = response(
+        '{"normalized_query":"Which issues involve kubelet and etcd?",'
+        '"intent":"GRAPH_ANALYTICS","intent_confidence":0.99,'
+        '"components":["kubelet","etcd"],"versions":[],"entities":[],'
+        '"symptoms":[],"error_messages":[],"observed_behavior":null,'
+        '"has_concrete_incident":false,"reasoning":"relationship query",'
+        '"analytics_operation":"RELATIONSHIP","group_by":"issue","limit":20}'
+    )
+
+    analysis = FHGenieClient(settings(), client=api).analyze_query(
+        "Which issues involve kubelet and etcd?"
+    )
+
+    assert analysis.analytics_operation == "RELATIONSHIP"
+    assert analysis.components == ["kubelet", "etcd"]
+    assert api.chat.completions.create.call_count == 1
+    assert api.chat.completions.create.call_args.kwargs["temperature"] == 0.0
+
+
+def test_analyze_query_retries_with_schema_validation_feedback() -> None:
+    api = MagicMock()
+    api.chat.completions.create.side_effect = [
+        response('{"intent":"GRAPH_ANALYTICS"}'),
+        response(
+            '{"normalized_query":"Count by version",'
+            '"intent":"GRAPH_ANALYTICS","intent_confidence":0.98,'
+            '"components":[],"versions":[],"entities":[],"symptoms":[],'
+            '"error_messages":[],"observed_behavior":null,'
+            '"has_concrete_incident":false,"reasoning":"version grouping",'
+            '"analytics_operation":"GROUP_BY","group_by":"version","limit":null}'
+        ),
+    ]
+
+    FHGenieClient(settings(), client=api).analyze_query("Count by version")
+
+    second_prompt = api.chat.completions.create.call_args_list[1].kwargs["messages"][0][
+        "content"
+    ]
+    assert "failed schema validation" in second_prompt
+    assert "Return JSON matching the required schema exactly" in second_prompt
+
+
 def resolution_issue() -> dict[str, object]:
     return {"title": "Collector loops", "body": "Valid owners keep processing",
         "resolution_evidence": {"comments": [{"id": 1, "author": "maintainer",

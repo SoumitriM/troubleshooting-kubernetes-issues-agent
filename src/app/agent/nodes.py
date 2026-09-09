@@ -10,13 +10,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.agent.state import (
     CypherGeneration,
     IncidentState,
-    IntentClassification,
     NormalizedQuery,
     QueryAnalysis,
+    QueryUnderstanding,
     Route,
 )
 from app.enrichment.fh_genie_client import FHGenieClient
-from app.enrichment.models import IssueEnrichment
 from app.documentation.store import KubernetesDocsRetriever
 from app.graph.analytics import GraphAnalyticsRepository
 from app.graph.cypher_validation import CypherValidator
@@ -58,7 +57,7 @@ class IncidentNodes:
         self._cypher_validator = cypher_validator or CypherValidator()
         self._enable_interrupts = enable_interrupts
 
-    def normalize_query(self, state: IncidentState) -> dict[str, Any]:
+    def understand_query(self, state: IncidentState) -> dict[str, Any]:
         original_query = state.get("original_query") or state["user_query"]
         history = list(state.get("clarification_history", []))
         query = "\n".join(
@@ -68,70 +67,59 @@ class IncidentNodes:
                 for index, answer in enumerate(history, 1)
             ]
         )
-        normalized = self._deterministic_normalization(query)
-        model_normalizer = getattr(self._fh_genie, "normalize_query", None)
-        if model_normalizer is not None:
-            try:
-                candidate = model_normalizer(query)
-                if self._preserves_technical_tokens(query, candidate.normalized_query):
-                    normalized = candidate
-            except Exception:
-                LOGGER.warning("Query normalization model output was invalid")
-        return {
-            "original_query": original_query,
-            "user_query": normalized.normalized_query,
-            "normalized_query": normalized.normalized_query,
-            "normalized_symptoms": normalized.symptoms,
-            "extracted_components": normalized.components,
-            "kubernetes_version": normalized.versions[0] if normalized.versions else None,
-            "entities": normalized.entities,
-            "error_messages": [],
-            "has_sufficient_details": False,
-            "missing_details": [
-                "specific observed behaviour",
-                "exact error message or error code",
-                "affected component",
-                "Kubernetes version",
-                "relevant logs",
-            ],
-            "cypher_attempt_count": 0,
-            "cypher_validation_errors": [],
-        }
-
-    def classify_intent(self, state: IncidentState) -> dict[str, Any]:
-        query = state["normalized_query"]
-        history = state.get("clarification_history", [])
-        routing_query = history[-1] if history else query
-        decision = self._deterministic_intent(routing_query)
-        if decision is None:
-            classifier = getattr(self._fh_genie, "classify_query", None)
-            if classifier is not None:
-                try:
-                    decision = classifier(self._normalization_from_state(state))
-                except Exception:
-                    LOGGER.warning("Intent classifier returned invalid output")
-        if decision is None:
-            decision = IntentClassification(
-                intent="INCIDENT_TROUBLESHOOTING",
-                confidence=0.55,
-                reasoning="Conservative fallback preserves the existing incident flow",
+        try:
+            analysis = self._fh_genie.analyze_query(query)
+            if not self._preserves_technical_tokens(query, analysis.normalized_query):
+                raise ValueError("normalized query lost an immutable technical token")
+        except Exception:
+            LOGGER.exception("FH Genie query understanding unavailable")
+            analysis = QueryUnderstanding(
+                normalized_query=query.strip(),
+                intent="NEEDS_CLARIFICATION",
+                intent_confidence=0.0,
+                reasoning="Query understanding service is temporarily unavailable",
             )
         LOGGER.info(
             "Query routed intent=%s confidence=%.2f",
-            decision.intent,
-            decision.confidence,
+            analysis.intent,
+            analysis.intent_confidence,
         )
+        symptom = analysis.observed_behavior or next(iter(analysis.symptoms), None)
+        missing_details: list[str] = []
+        if not symptom:
+            missing_details.append("specific observed behaviour")
+        if not analysis.error_messages:
+            missing_details.append("exact error message or error code")
+        if not analysis.components:
+            missing_details.append("affected component")
+        if not analysis.versions:
+            missing_details.append("Kubernetes version")
+        missing_details.append("relevant logs")
         return {
-            "intent": decision.intent,
-            "intent_confidence": decision.confidence,
-            "intent_reasoning": decision.reasoning,
+            "original_query": original_query,
+            "user_query": analysis.normalized_query,
+            "normalized_query": analysis.normalized_query,
+            "normalized_symptoms": analysis.symptoms,
+            "query_understanding": analysis,
+            "intent": analysis.intent,
+            "intent_confidence": analysis.intent_confidence,
+            "intent_reasoning": analysis.reasoning,
+            "entities": analysis.entities,
+            "extracted_symptom": symptom,
+            "extracted_components": analysis.components,
+            "kubernetes_version": next(iter(analysis.versions), None),
+            "error_messages": analysis.error_messages,
+            "has_sufficient_details": analysis.has_concrete_incident,
+            "missing_details": missing_details,
+            "cypher_attempt_count": 0,
+            "cypher_validation_errors": [],
         }
 
     def generate_cypher(self, state: IncidentState) -> dict[str, Any]:
         attempt = state.get("cypher_attempt_count", 0) + 1
         try:
             normalized = self._normalization_from_state(state)
-            generated = self._deterministic_cypher(normalized)
+            generated = self._analytics_cypher(state["query_understanding"])
             source = "deterministic"
             if generated is None:
                 source = "model"
@@ -283,119 +271,21 @@ class IncidentNodes:
         return excerpt or "The retrieved documentation did not contain explanatory text."
 
     def analyze_incident(self, state: IncidentState) -> dict[str, Any]:
-        original_query = state.get("original_query") or state["user_query"]
-        normalized_query = state.get("normalized_query") or original_query
-        history = list(state.get("clarification_history", []))
-        analysis_query = normalized_query
-        try:
-            facts = self._fh_genie.enrich(analysis_query, None)
-        except Exception:
-            LOGGER.warning(
-                "Incident analysis model unavailable; using deterministic extraction"
-            )
-            facts = IssueEnrichment(
-                symptom=(state.get("normalized_symptoms") or [None])[0],
-                components=state.get("extracted_components", []),
-                kubernetes_versions=(
-                    [state["kubernetes_version"]]
-                    if state.get("kubernetes_version")
-                    else []
-                ),
-                error_messages=[],
-            )
-        symptom = facts.symptom
-        specific_symptom = bool(symptom and not self._is_generic(symptom))
-        error_messages = [
-            message
-            for message in facts.error_messages
-            if message and not self._is_generic(message)
-        ]
-        query_error_signals = re.findall(
-            r"\b(?:[45]\d\d|0x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]+Error|"
-            r"CrashLoopBackOff|[A-Z][A-Z0-9_-]*\d+[A-Z0-9_-]*)\b",
-            analysis_query,
+        """Project the already validated semantic analysis into retrieval state."""
+
+        understanding = state["query_understanding"]
+        symptom = understanding.observed_behavior or next(
+            iter(understanding.symptoms), None
         )
-        error_messages = self._unique(
-            [
-                *[
-                    message
-                    for message in error_messages
-                    if self._text_is_present(message, analysis_query)
-                ],
-                *query_error_signals,
-            ]
-        )
-        version = next(
-            (
-                item
-                for item in facts.kubernetes_versions
-                if self._text_is_present(item, analysis_query)
-            ),
-            None,
-        )
-        behavior = self._has_problematic_behavior(analysis_query)
-        previous = state.get("query_analysis")
-        components = self._unique(
-            [
-                *(previous.components if previous else []),
-                *[
-                    component
-                    for component in facts.components
-                    if self._component_is_present(component, analysis_query)
-                ],
-            ]
-        )
-        error_messages = self._unique(
-            [*(previous.error_messages if previous else []), *error_messages]
-        )
-        symptom = (
-            symptom
-            if specific_symptom
-            else (previous.symptom if previous else None)
-        )
-        specific_symptom = bool(symptom and not self._is_generic(symptom))
-        version = version or (previous.kubernetes_version if previous else None)
-        meaningful_symptom = bool(
-            error_messages
-            or (
-                specific_symptom
-                and not self._is_generic_incident_query(analysis_query)
-                and behavior
-            )
-        )
-        has_diagnostic_detail = bool(
-            components
-            or version
-            or self._resource_kinds(analysis_query)
-            or self._has_log_message(analysis_query)
-            or self._error_codes(analysis_query)
-        )
-        has_sufficient_details = meaningful_symptom and has_diagnostic_detail
-        missing_details: list[str] = []
-        if not meaningful_symptom:
-            missing_details.append("specific observed behaviour")
-        if not error_messages:
-            missing_details.append("exact error message or error code")
-        if not components:
-            missing_details.append("affected component")
-        if not version:
-            missing_details.append("Kubernetes version")
-        if not re.search(r"\b(log|logs|stack trace|traceback)\b", state["user_query"], re.I):
-            missing_details.append("relevant logs")
         analysis = QueryAnalysis(
-            symptom=symptom if specific_symptom else None,
-            components=components,
-            kubernetes_version=version,
-            error_messages=error_messages,
-            has_sufficient_details=has_sufficient_details,
-            missing_details=missing_details,
+            symptom=symptom,
+            components=understanding.components,
+            kubernetes_version=next(iter(understanding.versions), None),
+            error_messages=understanding.error_messages,
+            has_sufficient_details=understanding.has_concrete_incident,
+            missing_details=state.get("missing_details", []),
         )
         return {
-            "original_query": original_query,
-            "user_query": analysis_query,
-            "clarification_history": history,
-            "clarification_attempts": state.get("clarification_attempts", 0),
-            "clarification_exhausted": False,
             "query_analysis": analysis,
             "extracted_symptom": analysis.symptom,
             "extracted_components": analysis.components,
@@ -619,17 +509,11 @@ class IncidentNodes:
         if state.get("kubernetes_version"):
             missing = [item for item in missing if "version" not in item.lower()]
         if after_no_match:
-            query = state.get("user_query", "")
             missing = [item for item in missing if item != "relevant logs"]
-            log_request = (
-                "relevant logs around the restart"
-                if re.search(r"\brestart(?:s|ed|ing)?\b", query, re.I)
-                else "relevant logs around the failure"
-            )
             missing = self._unique(
                 [
                     *missing,
-                    log_request,
+                    "relevant logs around the failure",
                     "pod events",
                     "container exit reason",
                     "whether one pod or multiple pods are affected",
@@ -645,120 +529,48 @@ class IncidentNodes:
         state: IncidentState,
         matched: list[dict[str, Any]],
     ) -> bool:
-        extracted_components = {
-            component.strip().lower()
-            for component in state.get("extracted_components", [])
-            if component.strip()
+        """Require compatibility between model-extracted diagnostic fields."""
+
+        understanding = state["query_understanding"]
+        query_components = {item.casefold() for item in understanding.components}
+        query_versions = {item.casefold() for item in understanding.versions}
+        query_diagnostics = {
+            item.casefold()
+            for item in [
+                *understanding.symptoms,
+                *understanding.error_messages,
+                understanding.observed_behavior,
+            ]
+            if item
         }
-        version = (state.get("kubernetes_version") or "").strip().lower()
-        query_tokens = self._semantic_tokens(
-            " ".join(
-                filter(
-                    None,
-                    [state.get("user_query"), state.get("extracted_symptom")],
-                )
-            )
-        )
         for issue in matched:
-            relevance = issue.get("relevance") or {}
-            if relevance.get("accepted"):
-                return True
             issue_components = {
-                component.strip().lower()
-                for component in issue.get("components", [])
-                if component.strip()
+                str(item).casefold() for item in issue.get("components", [])
             }
             issue_versions = {
-                item.strip().lower()
-                for item in issue.get("kubernetes_versions", [])
-                if item.strip()
+                str(item).casefold() for item in issue.get("kubernetes_versions", [])
             }
-            if extracted_components & issue_components:
-                return True
-            if version and version in issue_versions:
-                return True
-            issue_tokens = self._semantic_tokens(
-                f"{issue.get('title') or ''} {issue.get('summary') or ''}"
+            issue_diagnostics = {
+                str(item).casefold()
+                for item in [
+                    issue.get("symptom"),
+                    *issue.get("error_messages", []),
+                ]
+                if item
+            }
+            component_match = bool(query_components & issue_components)
+            version_match = bool(query_versions & issue_versions)
+            diagnostic_match = any(
+                query_value in issue_value or issue_value in query_value
+                for query_value in query_diagnostics
+                for issue_value in issue_diagnostics
             )
-            overlap = query_tokens & issue_tokens
-            if len(overlap) >= 2 or any(len(token) >= 10 for token in overlap):
+            if query_diagnostics:
+                if diagnostic_match and (component_match or version_match):
+                    return True
+            elif component_match or version_match:
                 return True
         return False
-
-    @classmethod
-    def _is_generic(cls, value: str) -> bool:
-        normalized = " ".join(re.findall(r"[a-z0-9]+", value.lower()))
-        if normalized in cls.GENERIC_DESCRIPTIONS:
-            return True
-        return len(normalized.split()) <= 6 and any(
-            phrase in normalized for phrase in cls.GENERIC_DESCRIPTIONS
-        )
-
-    @classmethod
-    def _has_problematic_behavior(cls, value: str) -> bool:
-        normalized = " ".join(re.findall(r"[a-z0-9]+", value.lower()))
-        if normalized in cls.GENERIC_DESCRIPTIONS:
-            return False
-        tokens = set(normalized.split())
-        if tokens & cls.BEHAVIOR_TERMS:
-            return True
-        return bool(re.search(r"\b(crashloopbackoff|error\s*\d+|[45]\d\d)\b", normalized))
-
-    @classmethod
-    def _is_generic_incident_query(cls, value: str) -> bool:
-        normalized = " ".join(re.findall(r"[a-z0-9]+", value.lower()))
-        contains_generic_phrase = any(
-            re.search(pattern, normalized)
-            for pattern in cls.GENERIC_QUERY_PATTERNS
-        )
-        if not contains_generic_phrase:
-            return False
-        # An earlier vague turn must not veto a later clarification that adds
-        # concrete observed behaviour.
-        return not bool(set(normalized.split()) & cls.BEHAVIOR_TERMS)
-
-    @staticmethod
-    def _text_is_present(value: str, query: str) -> bool:
-        normalized_value = " ".join(re.findall(r"[a-z0-9]+", value.lower()))
-        normalized_query = " ".join(re.findall(r"[a-z0-9]+", query.lower()))
-        return bool(normalized_value and normalized_value in normalized_query)
-
-    @classmethod
-    def _component_is_present(cls, component: str, query: str) -> bool:
-        normalized = " ".join(re.findall(r"[a-z0-9]+", component.lower()))
-        if normalized in cls.GENERIC_COMPONENTS:
-            return False
-        return cls._text_is_present(component, query)
-
-    @classmethod
-    def _resource_kinds(cls, query: str) -> set[str]:
-        tokens = set(re.findall(r"[a-z0-9]+", query.lower()))
-        return tokens & cls.RESOURCE_KINDS
-
-    @staticmethod
-    def _has_log_message(query: str) -> bool:
-        return bool(
-            re.search(
-                r"(?:\blog(?:s| message)?\s*[:=]\s*\S|`[^`]+`|\"[^\"]+\")",
-                query,
-                re.I,
-            )
-        )
-
-    @staticmethod
-    def _error_codes(query: str) -> list[str]:
-        return re.findall(
-            r"\b(?:[45]\d\d|0x[0-9a-fA-F]+|[A-Z][A-Z0-9_-]*\d+[A-Z0-9_-]*)\b",
-            query,
-        )
-
-    @classmethod
-    def _semantic_tokens(cls, value: str) -> set[str]:
-        return {
-            token
-            for token in re.findall(r"[a-z0-9]+", value.lower())
-            if len(token) >= 3 and token not in cls.SEMANTIC_STOP_WORDS
-        }
 
     @staticmethod
     def _format_finding(issue: dict[str, Any]) -> str:
@@ -801,51 +613,6 @@ class IncidentNodes:
     def _unique(values: Any) -> list[str]:
         return list(dict.fromkeys(value for value in values if value))
 
-    @classmethod
-    def _deterministic_normalization(cls, query: str) -> NormalizedQuery:
-        cleaned = " ".join(query.strip().split())
-        versions = cls._unique(
-            re.findall(r"\bv?\d+\.\d+(?:\.\d+)?\b", cleaned, re.I)
-        )
-        component_terms = (
-            "kubelet",
-            "kube-apiserver",
-            "api server",
-            "scheduler",
-            "controller manager",
-            "etcd",
-            "containerd",
-            "kube-proxy",
-            "certificate",
-            "certificates",
-            "pod",
-            "pods",
-        )
-        components = [
-            term for term in component_terms if re.search(rf"\b{re.escape(term)}\b", cleaned, re.I)
-        ]
-        entities = cls._unique(
-            [
-                *components,
-                *versions,
-                *re.findall(r"\bCVE-\d{4}-\d+\b", cleaned, re.I),
-                *re.findall(r"(?:#|issues?/)(\d+)\b", cleaned, re.I),
-            ]
-        )
-        symptoms = (
-            [cleaned]
-            if cls._has_problematic_behavior(cleaned)
-            or re.search(r"CrashLoopBackOff|crash(?:es|ed|ing)?", cleaned, re.I)
-            else []
-        )
-        return NormalizedQuery(
-            normalized_query=cleaned,
-            components=components,
-            versions=versions,
-            symptoms=symptoms,
-            entities=entities,
-        )
-
     @staticmethod
     def _preserves_technical_tokens(original: str, normalized: str) -> bool:
         tokens = re.findall(
@@ -867,59 +634,6 @@ class IncidentNodes:
             entities=state.get("entities", []),
         )
 
-    @classmethod
-    def _deterministic_intent(
-        cls, query: str
-    ) -> IntentClassification | None:
-        normalized = " ".join(query.lower().split())
-        if normalized in cls.GENERIC_DESCRIPTIONS or normalized in {
-            "help",
-            "it failed",
-        }:
-            return IntentClassification(
-                intent="NEEDS_CLARIFICATION",
-                confidence=0.99,
-                reasoning="The query does not identify a concrete question or symptom",
-            )
-        if re.search(
-            r"\b(most common|how many|count|top\s+\d*|which components?|"
-            r"associated with|affect both|most reported|group by|trend)\b",
-            normalized,
-        ):
-            return IntentClassification(
-                intent="GRAPH_ANALYTICS",
-                confidence=0.98,
-                reasoning="The query requests aggregation or graph relationships",
-            )
-        if re.match(
-            r"^(what does|what is|what happens when|how (?:does|do)|explain|describe)\b",
-            normalized,
-        ):
-            return IntentClassification(
-                intent="GENERAL_KUBERNETES_QUESTION",
-                confidence=0.97,
-                reasoning="The query asks for conceptual Kubernetes knowledge",
-            )
-        if re.match(r"^why do(?:es)?\b", normalized) and not re.search(
-            r"\b(my|our|after|started|suddenly)\b", normalized
-        ):
-            return IntentClassification(
-                intent="GENERAL_KUBERNETES_QUESTION",
-                confidence=0.9,
-                reasoning="The query asks for a general mechanism",
-            )
-        if re.search(
-            r"\b(my|our|started|after|upgrade|upgrading|crash(?:es|ed|ing)?|"
-            r"failing|failed|error|stuck|pending|restart(?:s|ed|ing)?)\b",
-            normalized,
-        ):
-            return IntentClassification(
-                intent="INCIDENT_TROUBLESHOOTING",
-                confidence=0.95,
-                reasoning="The query describes a concrete observed failure",
-            )
-        return None
-
     @staticmethod
     def _format_graph_results(rows: list[dict[str, Any]]) -> str:
         if not rows:
@@ -930,30 +644,37 @@ class IncidentNodes:
         )
 
     @staticmethod
-    def _deterministic_cypher(
-        normalized: NormalizedQuery,
+    def _analytics_cypher(
+        understanding: QueryUnderstanding,
     ) -> CypherGeneration | None:
-        query = normalized.normalized_query.lower()
-        components = [
-            component.lower()
-            for component in normalized.components
-            if component.lower() not in {"pod", "pods"}
-        ]
-        versions = normalized.versions
-
-        if re.search(r"\b(which components?|most reported issues)\b", query):
+        operation = understanding.analytics_operation
+        group_by = understanding.group_by
+        limit = understanding.limit or 20
+        if operation == "TOP_N" and group_by == "component":
             return CypherGeneration(
                 cypher=(
                     "MATCH (i:Issue)-[:AFFECTS_COMPONENT]->(c:Component) "
                     "RETURN c.name AS component, count(DISTINCT i) AS issue_count "
-                    "ORDER BY issue_count DESC LIMIT 20"
+                    f"ORDER BY issue_count DESC LIMIT {limit}"
                 ),
                 parameters={},
-                explanation="Count reported issues by component",
+                explanation="Rank components by distinct issue count",
             )
-
-        if "affect both" in query and len(components) >= 2:
-            selected = list(dict.fromkeys(components))
+        if operation in {"COUNT", "GROUP_BY"} and group_by == "version":
+            return CypherGeneration(
+                cypher=(
+                    "MATCH (i:Issue)-[:REPORTED_IN_VERSION]->(v:KubernetesVersion) "
+                    "RETURN v.version AS kubernetes_version, "
+                    "count(DISTINCT i) AS incident_count "
+                    f"ORDER BY incident_count DESC LIMIT {limit}"
+                ),
+                parameters={},
+                explanation="Count incidents by Kubernetes version",
+            )
+        if operation == "RELATIONSHIP" and len(understanding.components) >= 2:
+            components = list(dict.fromkeys(
+                component.lower() for component in understanding.components
+            ))
             return CypherGeneration(
                 cypher=(
                     "MATCH (i:Issue)-[:AFFECTS_COMPONENT]->(c:Component) "
@@ -961,134 +682,48 @@ class IncidentNodes:
                     "WITH i, count(DISTINCT toLower(c.name)) AS matched_components "
                     "WHERE matched_components = $component_count "
                     "RETURN i.issue_number AS issue_number, i.title AS title, "
-                    "i.html_url AS url ORDER BY issue_number DESC LIMIT 20"
+                    f"i.html_url AS url ORDER BY issue_number DESC LIMIT {limit}"
                 ),
                 parameters={
-                    "components": selected,
-                    "component_count": len(selected),
+                    "components": components,
+                    "component_count": len(components),
                 },
-                explanation="Find issues linked to every requested component",
+                explanation="Find issues connected to every requested component",
             )
-
-        if re.search(r"\b(associated with|certificate failures?)\b", query):
-            term = "certificate" if "certificate" in query else "failure"
-            return CypherGeneration(
-                cypher=(
-                    "MATCH (i:Issue)-[:AFFECTS_COMPONENT]->(c:Component) "
-                    "OPTIONAL MATCH (i)-[:HAS_ERROR]->(e:ErrorMessage) "
-                    "WHERE toLower(coalesce(i.symptom, '')) CONTAINS $term "
-                    "OR toLower(coalesce(i.summary, '')) CONTAINS $term "
-                    "OR toLower(coalesce(e.message, '')) CONTAINS $term "
-                    "RETURN c.name AS component, count(DISTINCT i) AS issue_count "
-                    "ORDER BY issue_count DESC LIMIT 20"
-                ),
-                parameters={"term": term},
-                explanation="Count components linked to matching incident text",
-            )
-
-        if "most common" in query and components:
-            filters = ["toLower(c.name) = $component"]
-            parameters: dict[str, Any] = {"component": components[0]}
+        if operation == "LIST" and group_by == "issue" and understanding.components:
+            parameters: dict[str, Any] = {
+                "component": understanding.components[0].lower(),
+            }
             version_match = ""
-            if versions:
+            version_filter = ""
+            if understanding.versions:
                 version_match = (
                     "MATCH (i)-[:REPORTED_IN_VERSION]->(v:KubernetesVersion) "
                 )
-                filters.append("v.version = $version")
-                parameters["version"] = versions[0]
+                version_filter = " AND v.version = $version"
+                parameters["version"] = understanding.versions[0]
             return CypherGeneration(
                 cypher=(
                     "MATCH (i:Issue)-[:AFFECTS_COMPONENT]->(c:Component) "
                     + version_match
-                    + "WHERE "
-                    + " AND ".join(filters)
+                    + "WHERE toLower(c.name) = $component"
+                    + version_filter
                     + " RETURN i.issue_number AS issue_number, i.title AS title, "
                     "i.summary AS summary, i.html_url AS url, "
                     "coalesce(i.comments_count, 0) AS discussion_count "
-                    "ORDER BY discussion_count DESC LIMIT 20"
+                    f"ORDER BY discussion_count DESC LIMIT {limit}"
                 ),
                 parameters=parameters,
-                explanation="List the most discussed matching issues",
+                explanation="List issues matching structured component filters",
+            )
+        if operation in {"COUNT", "GROUP_BY"} and group_by == "component":
+            return CypherGeneration(
+                cypher=(
+                    "MATCH (i:Issue)-[:AFFECTS_COMPONENT]->(c:Component) "
+                    "RETURN c.name AS component, count(DISTINCT i) AS issue_count "
+                    f"ORDER BY issue_count DESC LIMIT {limit}"
+                ),
+                parameters={},
+                explanation="Count incidents by component",
             )
         return None
-
-    GENERIC_DESCRIPTIONS = {
-        "not working",
-        "broken",
-        "has an issue",
-        "there is an error",
-        "something is wrong",
-        "kubernetes problem",
-        "kubernetes is not working",
-        "something is broken",
-        "behave incorrectly",
-        "something failed",
-    }
-    GENERIC_QUERY_PATTERNS = (
-        r"\bnot working\b",
-        r"\bbehav(?:e|es|ed|ing) incorrectly\b",
-        r"\bhas an issue\b",
-        r"\bsomething fail(?:s|ed|ing)?\b",
-        r"\bkubernetes (?:object|objects|problem)\b",
-    )
-    GENERIC_COMPONENTS = {"kubernetes", "object", "objects", "cluster"}
-    RESOURCE_KINDS = {
-        "configmap",
-        "configmaps",
-        "cronjob",
-        "cronjobs",
-        "daemonset",
-        "daemonsets",
-        "deployment",
-        "deployments",
-        "job",
-        "jobs",
-        "namespace",
-        "namespaces",
-        "node",
-        "nodes",
-        "pod",
-        "pods",
-        "secret",
-        "secrets",
-        "service",
-        "services",
-        "statefulset",
-        "statefulsets",
-    }
-    BEHAVIOR_TERMS = {
-        "allow",
-        "bypass",
-        "cannot",
-        "crash",
-        "denied",
-        "enable",
-        "fail",
-        "hang",
-        "leak",
-        "pending",
-        "process",
-        "processes",
-        "processing",
-        "restart",
-        "stuck",
-        "timeout",
-        "unable",
-    }
-    SEMANTIC_STOP_WORDS = {
-        "after",
-        "and",
-        "are",
-        "can",
-        "for",
-        "from",
-        "into",
-        "issue",
-        "kubernetes",
-        "not",
-        "that",
-        "the",
-        "this",
-        "users",
-        "with",
-    }

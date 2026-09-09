@@ -1,7 +1,7 @@
 from typing import Any
 
 from app.agent.nodes import AgentSettings, IncidentNodes
-from app.agent.state import GroundedFixAnswer, QueryAnalysis
+from app.agent.state import GroundedFixAnswer, QueryAnalysis, QueryUnderstanding
 from app.agent.workflow import build_workflow
 from app.enrichment.models import IssueEnrichment
 
@@ -58,6 +58,28 @@ class FakeFHGenie:
             kubernetes_versions=["v1.32"],
         )
 
+    def analyze_query(self, query: str) -> QueryUnderstanding:
+        facts = self.enrich(query, None)
+        vague = query.lower() in {
+            "kubernetes is not working",
+            "my kubernetes cluster is not working",
+            "some kubernetes objects behave incorrectly",
+            "something is broken",
+            "there is an error",
+        }
+        return QueryUnderstanding(
+            normalized_query=query,
+            intent=("NEEDS_CLARIFICATION" if vague else "INCIDENT_TROUBLESHOOTING"),
+            intent_confidence=0.98,
+            components=facts.components,
+            versions=facts.kubernetes_versions,
+            symptoms=[facts.symptom] if facts.symptom and not vague else [],
+            error_messages=facts.error_messages,
+            observed_behavior=facts.symptom if not vague else None,
+            has_concrete_incident=not vague,
+            reasoning="Test semantic analysis",
+        )
+
     def generate_grounded_fix(
         self,
         user_query: str,
@@ -106,6 +128,7 @@ def matched_issue(
         "issue_number": 1,
         "title": "DRA authorization issue",
         "summary": "Namespace labels enabled admin access",
+        "symptom": "DRA adminAccess can be enabled",
         "url": "https://github.com/kubernetes/kubernetes/issues/1",
         "score": score,
         "components": ["DRA"],
@@ -375,7 +398,7 @@ def test_specific_crashloop_query_calls_retrieval() -> None:
     assert "I already have error CrashLoopBackOff" in result["answer"]
     assert "component kubelet" in result["answer"]
     assert "Kubernetes version v1.35" in result["answer"]
-    assert "relevant logs around the restart" in result["answer"]
+    assert "relevant logs around the failure" in result["answer"]
     assert "pod events" in result["answer"]
     assert "container exit reason" in result["answer"]
     assert "whether one pod or multiple pods are affected" in result["answer"]
@@ -413,3 +436,29 @@ def test_specific_query_with_high_score_but_weak_semantics_requests_clarificatio
     assert result["top_similarity_score"] == 0.92
     assert retriever.calls == 1
     assert fh_genie.fix_calls == 0
+
+
+def test_shared_component_does_not_override_incompatible_symptom() -> None:
+    nodes = IncidentNodes(  # type: ignore[arg-type]
+        FakeFHGenie(), None, AgentSettings(_env_file=None)
+    )
+    understanding = QueryUnderstanding(
+        normalized_query="Pod enters CrashLoopBackOff after kubelet restart",
+        intent="INCIDENT_TROUBLESHOOTING",
+        intent_confidence=0.99,
+        components=["kubelet"],
+        symptoms=["Pod enters CrashLoopBackOff"],
+        error_messages=["CrashLoopBackOff"],
+        observed_behavior="Pod enters CrashLoopBackOff",
+        has_concrete_incident=True,
+        reasoning="Concrete pod crash",
+    )
+
+    assert nodes._has_evidence_overlap(
+        {"query_understanding": understanding},
+        [{
+            "components": ["kubelet", "etcd"],
+            "symptom": "etcd static pod exits normally with exitCode 0",
+            "error_messages": ["exitCode 0"],
+        }],
+    ) is False

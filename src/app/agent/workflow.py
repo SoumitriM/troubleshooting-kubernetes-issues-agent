@@ -13,8 +13,7 @@ def build_workflow(
     """Compile the routed Kubernetes knowledge-assistant graph."""
 
     graph = StateGraph(IncidentState)
-    graph.add_node("normalize_query", nodes.normalize_query)
-    graph.add_node("classify_intent", nodes.classify_intent)
+    graph.add_node("understand_query", nodes.understand_query)
     graph.add_node("analyze_incident", nodes.analyze_incident)
     graph.add_node("retrieve_evidence", nodes.retrieve_evidence)
     graph.add_node("assess_evidence", nodes.assess_evidence)
@@ -30,10 +29,9 @@ def build_workflow(
     graph.add_node(
         "answer_from_kubernetes_docs", nodes.answer_from_kubernetes_docs
     )
-    graph.add_edge(START, "normalize_query")
-    graph.add_edge("normalize_query", "classify_intent")
+    graph.add_edge(START, "understand_query")
     graph.add_conditional_edges(
-        "classify_intent",
+        "understand_query",
         route_after_intent,
         {
             "INCIDENT_TROUBLESHOOTING": "analyze_incident",
@@ -80,7 +78,7 @@ def build_workflow(
     graph.add_conditional_edges(
         "request_clarification",
         route_after_clarification,
-        {"normalize_query": "normalize_query", "end": END},
+        {"understand_query": "understand_query", "end": END},
     )
     return graph.compile(checkpointer=checkpointer)
 
@@ -112,4 +110,4 @@ def route_after_analysis(state: IncidentState) -> str:
 def route_after_clarification(state: IncidentState) -> str:
     if state.get("clarification_exhausted") or state.get("answer"):
         return "end"
-    return "normalize_query"
+    return "understand_query"
