@@ -60,6 +60,12 @@ ReplySituation = Literal[
 _URL = re.compile(r"https?://\S+")
 _CODE_SPAN = re.compile(r"`([^`]+)`")
 _ISSUE_REF = re.compile(r"#(\d+)")
+# Incident replies troubleshoot the user's problem rather than narrate records.
+_MATCH_FRAMING = re.compile(
+    r"\b(?:this|it|that) (?:closely )?match(?:es|ed)\b|\bclosest match\b"
+    r"|\bin that (?:report|issue|cluster)\b",
+    re.IGNORECASE,
+)
 _NUMBER = re.compile(r"\d+(?:[.,:]\d+)*")
 
 
@@ -333,6 +339,13 @@ class ClaudeClient:
         def check(output: ComposedReply) -> str | None:
             if not set(output.citations).issubset(allowed_urls):
                 return "response contains unsupported citation"
+            if situation in {"incident_fix", "incident_findings"} and (
+                _ISSUE_REF.search(output.reply) or _MATCH_FRAMING.search(output.reply)
+            ):
+                return (
+                    "help with the user's problem; do not mention issue numbers "
+                    "or say the report matches another issue"
+                )
             if situation in {"out_of_scope", "graph_failed"} and not set(
                 output.suggestions
             ).issubset(examples or []):

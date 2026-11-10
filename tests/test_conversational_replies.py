@@ -61,9 +61,9 @@ def test_compose_reply_retries_an_invented_number_then_succeeds() -> None:
     )
 
     composed = claude.compose_reply(
-        "incident_findings",
-        user_message="gc loops",
-        facts={"direct_matches": [{"issue_number": 141382, "url": url}]},
+        "analytics",
+        user_message="list gc issues",
+        facts={"rows": [{"issue_number": 141382, "url": url}]},
     )
 
     assert composed.reply == "This looks like #141382."
@@ -155,7 +155,7 @@ def test_chat_clarifies_conversationally_and_offers_suggestions() -> None:
     answer = second["message"]
     assert answer["route"] == "generate_findings"
     assert answer["content"].startswith("This looks like #141382")
-    assert "**Closest reported issues:**" in answer["content"]
+    assert "**Similar reported failures:**" in answer["content"]
     assert answer["suggestions"] == ["Which versions does this affect?"]
     assert answer["citations"] == [
         "https://github.com/kubernetes/kubernetes/issues/141382"
@@ -275,3 +275,23 @@ def test_documentation_suggestions_are_checked_against_the_chunks() -> None:
     answer = claude.answer_documentation_question("What is the kubelet?", [chunk])
 
     assert answer.suggestions == ["What else does the node agent do?"]
+
+
+def test_incident_reply_that_narrates_the_match_is_retried() -> None:
+    claude, api = client(
+        response('{"reply":"This matches #141080.","citations":[],"suggestions":[]}'),
+        response(
+            '{"reply":"Your master VM likely failed because of a bad image; '
+            'follow the steps below.","citations":[],"suggestions":[]}'
+        ),
+    )
+
+    composed = claude.compose_reply(
+        "incident_fix",
+        user_message="e2e-up.sh fails",
+        facts={"reported_failures": [{"issue_number": 141080}]},
+    )
+
+    assert composed.reply.startswith("Your master VM likely failed")
+    retry_system = api.beta.messages.create.call_args_list[1].kwargs["system"]
+    assert "do not mention issue numbers" in retry_system

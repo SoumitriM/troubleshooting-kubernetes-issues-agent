@@ -41,8 +41,14 @@ to three `suggestions` that the UI shows as clickable follow-ups.
 
 The composer can only rephrase:
 
-- Evidence stays verbatim. Fix summaries and verified steps, issue lists and
-  analytics rows are appended by code below the composed text.
+- Evidence stays verbatim. Verified fix steps, issue lists and analytics rows
+  are appended by code below the composed text. On the fix route the reply
+  explains the verified summary and root cause as troubleshooting advice
+  ("the most likely cause is …"), so the summary is not repeated; when the
+  composer is unavailable, the summary is shown verbatim instead.
+- Incident replies talk about the user's problem, not the records. A reply on
+  the fix or findings route that mentions an issue number or says the report
+  "matches" one is rejected; the evidence list and sources show provenance.
 - `ungrounded_reply_reason` rejects a reply containing an issue reference,
   number, version or backticked `code` that is not in the payload, or any URL.
   Clarifications receive a fixed list of read-only diagnostic commands

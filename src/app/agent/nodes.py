@@ -766,25 +766,30 @@ class IncidentNodes:
         steps = "\n".join(f"- {step}" for step in verified_steps)
         context = state.get("retrieved_context", {})
         fixed_issues = [
-            {
-                **self._issue_facts(issue),
-                "resolution_summary": (issue.get("actionable_fix") or {}).get(
-                    "resolution_summary"
-                ),
-            }
+            issue
             for issue in [
                 *context.get("matched_issues", []),
                 *context.get("related_issues", []),
             ]
             if (issue.get("actionable_fix") or {}).get("resolution_summary") == answer
         ]
+        root_cause = next(
+            (
+                cause
+                for issue in fixed_issues
+                if (cause := (issue.get("verified_disposition") or {}).get("root_cause"))
+            ),
+            None,
+        )
         composed = self._converse(
             state,
             "incident_fix",
             {
-                "matched_issues": fixed_issues,
-                "fix_summary_shown_below": answer,
+                "known_details": self._known_details(state),
+                "root_cause": root_cause,
+                "fix_summary": answer,
                 "verified_steps_shown_below": verified_steps,
+                "reported_failures": [self._issue_facts(issue) for issue in fixed_issues],
             },
         )
         if composed is None:
@@ -793,10 +798,14 @@ class IncidentNodes:
                 "citations": citations,
                 "suggestions": [],
             }
-        # The summary and steps stay verbatim from the evidence; only the lead
-        # sentence is model-written.
+        # The steps stay verbatim from the evidence. The reply explains the
+        # verified summary in troubleshooting terms (its details are checked
+        # against the payload), so the summary is not repeated under it.
         return {
-            "answer": f"{composed.reply}\n\n{answer}\n\n**Verified steps:**\n{steps}",
+            "answer": (
+                f"{composed.reply}\n\n**Verified steps** (from a resolved report):"
+                f"\n{steps}"
+            ),
             "citations": self._unique([*citations, *composed.citations]),
             "suggestions": composed.suggestions,
         }
@@ -842,7 +851,7 @@ class IncidentNodes:
         details = [composed.reply]
         if matched:
             details.append(
-                "**Closest reported issues:**\n"
+                "**Similar reported failures:**\n"
                 + "\n".join(self._format_finding(issue) for issue in matched)
             )
         if related:
