@@ -75,7 +75,28 @@ _REPORTED_ISSUES = re.compile(
     r"\breported (?:issue|problem|incident)s?\b|\b(?:could ?n[o']t|did ?n[o']t) find\b",
     re.IGNORECASE,
 )
+# A dotted field path such as `resources.limits.memory`. Docs usually show the
+# same field as nested YAML, so it is grounded when each part is supplied.
+_FIELD_PATH = re.compile(r"[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z][A-Za-z0-9_-]*)+")
 _NUMBER = re.compile(r"\d+(?:[.,:]\d+)*")
+
+
+def _code_span_supplied(span: str, supplied_text: str) -> bool:
+    """Whether a backticked span is grounded in the payload.
+
+    Commands, flags and error text must appear verbatim. A dotted field path
+    is also accepted when every segment appears as a whole word, because the
+    docs write `resources.limits.memory` as nested YAML keys.
+    """
+
+    if span in supplied_text:
+        return True
+    if not _FIELD_PATH.fullmatch(span):
+        return False
+    return all(
+        re.search(rf"(?<![A-Za-z0-9_-]){re.escape(part)}(?![A-Za-z0-9_-])", supplied_text)
+        for part in span.split(".")
+    )
 
 
 def ungrounded_reply_reason(reply: str, supplied_text: str) -> str | None:
@@ -101,7 +122,7 @@ def ungrounded_reply_reason(reply: str, supplied_text: str) -> str | None:
         if reference not in numbers:
             return f"issue #{reference} was not supplied"
     for span in _CODE_SPAN.findall(reply):
-        if span.strip() not in supplied_text:
+        if not _code_span_supplied(span.strip(), supplied_text):
             return f"code `{span}` does not appear in the payload"
     for number in _NUMBER.findall(_CODE_SPAN.sub(" ", reply)):
         if not supplied(number.rstrip(".,:")):

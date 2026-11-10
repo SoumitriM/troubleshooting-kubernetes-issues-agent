@@ -512,3 +512,34 @@ def test_irrelevant_clarification_answer_is_declined_not_merged(off_topic: str) 
     # The declined message never becomes incident evidence.
     assert not any(off_topic in text for text in llm.analysis_inputs[2:])
     assert resumed["route"] == "generate_findings"
+
+
+YAML_DOC = '{"text": "resources:\\n  limits:\\n    memory: \\"200Mi\\""}'
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Check `resources.limits.memory` on the container.",
+        "Set `resources.limits.memory` to `200Mi`.",
+    ],
+)
+def test_dotted_field_path_is_grounded_by_nested_yaml(reply: str) -> None:
+    assert ungrounded_reply_reason(reply, YAML_DOC) is None
+
+
+@pytest.mark.parametrize(
+    ("reply", "span"),
+    [
+        # A segment that is not supplied.
+        ("Check `resources.limits.cpuQuota`.", "resources.limits.cpuQuota"),
+        # Segments must be whole words, not fragments of supplied words.
+        ("Check `resource.limit.memory`.", "resource.limit.memory"),
+        # Commands still need to appear verbatim, even if each word is supplied.
+        ("Run `kubectl set resources limits memory`.", "kubectl set resources limits memory"),
+        # A version is not a field path.
+        ("Upgrade to `v1.36`.", "v1.36"),
+    ],
+)
+def test_other_code_spans_still_need_verbatim_support(reply: str, span: str) -> None:
+    assert f"code `{span}`" in (ungrounded_reply_reason(reply, YAML_DOC) or "")
