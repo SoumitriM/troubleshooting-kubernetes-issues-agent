@@ -5,10 +5,14 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
 RUN npm run build
+# The API address nginx proxies to. The default is the in-cluster Service of the
+# local Kubernetes manifests; Azure Container Apps passes its internal app URL.
+ARG API_UPSTREAM=http://incident-resolution-ai:8000
+RUN sed "s#http://incident-resolution-ai:8000#${API_UPSTREAM}#g" nginx.conf > /build/nginx.conf
 
 FROM nginxinc/nginx-unprivileged:stable-alpine
 COPY --from=builder /build/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/nginx.conf
+COPY --from=builder /build/nginx.conf /etc/nginx/nginx.conf
 
 EXPOSE 8080
 

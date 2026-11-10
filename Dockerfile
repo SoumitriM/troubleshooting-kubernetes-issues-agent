@@ -17,7 +17,10 @@ RUN apt-get update \
 WORKDIR /tmp/build
 COPY pyproject.toml README.md ./
 COPY src ./src
+# CPU-only PyTorch: the embedding model runs on CPU, and the default CUDA build
+# adds several GB to the image and to every cold start.
 RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch \
     && python -m pip install --no-cache-dir --no-compile . \
     && find /usr/local/lib/python3.11/site-packages \
         -type d -name __pycache__ -prune -exec rm -rf '{}' + \
