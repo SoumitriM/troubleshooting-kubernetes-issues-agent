@@ -209,6 +209,19 @@ question before routing. Retrieval and answers then use only that standalone
 question, so the history cannot add evidence. A question on a new topic does
 not inherit details from earlier turns.
 
+Each conversation also keeps a running incident summary in the
+`conversations.memory` column: the current problem, components, versions,
+exact error messages, what the user observed or ruled out, the key findings
+of earlier replies, and the last open question. After every reply,
+`ClaudeClient.update_incident_memory` merges the turn into it in a background
+task. The task holds the conversation lock, so the next message always sees
+the updated summary, but the reply itself is not delayed. `understand_query`
+passes the summary to Claude with the recent messages, so a detail given
+twenty messages ago (a version, an error) still completes a follow-up such as
+"what should I check next?". A new topic ignores it. Every value in the
+summary must appear in the user's message or the assistant's reply, and error
+messages must be verbatim. If an update fails, the previous summary is kept.
+
 If the previous assistant message asked for clarification, the next message
 answers that question: it resumes the paused thread instead of starting a new
 one.

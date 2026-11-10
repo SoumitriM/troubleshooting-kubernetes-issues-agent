@@ -134,6 +134,9 @@ class IncidentState(TypedDict, total=False):
     # Earlier turns of a chat conversation ({"role", "content"}), used only to
     # resolve follow-up references when interpreting the current query.
     conversation_history: list[dict[str, str]]
+    # Running summary of the chat's current problem (IncidentMemory as a
+    # dict), so details from turns older than the history window are kept.
+    incident_memory: dict[str, Any]
     debug: bool
     query_analysis: QueryAnalysis
     query_understanding: QueryUnderstanding
@@ -285,3 +288,52 @@ class DocsTroubleshootingAnswer(BaseModel):
     @classmethod
     def validate_suggestions(cls, suggestions: list[str]) -> list[str]:
         return clean_suggestions(suggestions)
+
+
+MEMORY_ITEM_CHARS = 200
+MEMORY_LIST_ITEMS = 10
+
+
+class IncidentMemory(BaseModel):
+    """Facts gathered about the user's current problem across a whole chat.
+
+    Every value comes from the user's own messages or the assistant's
+    evidence-backed replies; the client rejects details absent from both.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    problem: str | None = None
+    components: list[str] = Field(default_factory=list)
+    versions: list[str] = Field(default_factory=list)
+    error_messages: list[str] = Field(default_factory=list)
+    observations: list[str] = Field(default_factory=list)
+    ruled_out: list[str] = Field(default_factory=list)
+    findings: list[str] = Field(default_factory=list)
+    open_question: str | None = None
+
+    @field_validator("problem", "open_question")
+    @classmethod
+    def validate_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = " ".join(value.split())
+        if len(text) > MEMORY_ITEM_CHARS * 2:
+            raise ValueError(f"keep it under {MEMORY_ITEM_CHARS * 2} characters")
+        return text or None
+
+    @field_validator(
+        "components", "versions", "error_messages", "observations", "ruled_out", "findings"
+    )
+    @classmethod
+    def validate_items(cls, items: list[str]) -> list[str]:
+        cleaned = list(dict.fromkeys(" ".join(item.split()) for item in items if item.strip()))
+        if len(cleaned) > MEMORY_LIST_ITEMS:
+            raise ValueError(f"keep at most {MEMORY_LIST_ITEMS} items per list")
+        for item in cleaned:
+            if len(item) > MEMORY_ITEM_CHARS:
+                raise ValueError(f"keep each item under {MEMORY_ITEM_CHARS} characters")
+        return cleaned
+
+    def is_empty(self) -> bool:
+        return not any(self.model_dump().values())

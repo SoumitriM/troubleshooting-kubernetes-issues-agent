@@ -15,6 +15,7 @@ from app.agent.state import (
     CypherGeneration,
     DocsTroubleshootingAnswer,
     GroundedFixAnswer,
+    IncidentMemory,
     IncidentMatchVerification,
     IntentClassification,
     NormalizedQuery,
@@ -31,6 +32,7 @@ from app.enrichment.prompts import (
     FIX_ANSWER_SYSTEM_PROMPT,
     INCIDENT_MATCH_SYSTEM_PROMPT,
     INTENT_SYSTEM_PROMPT,
+    MEMORY_UPDATE_SYSTEM_PROMPT,
     NORMALIZATION_SYSTEM_PROMPT,
     QUERY_UNDERSTANDING_SYSTEM_PROMPT,
     RESEARCH_SYSTEM_PROMPT,
@@ -423,19 +425,63 @@ class ClaudeClient:
         )
 
     def analyze_query(
-        self, query: str, history: list[dict[str, str]] | None = None
+        self,
+        query: str,
+        history: list[dict[str, str]] | None = None,
+        memory: dict[str, Any] | None = None,
     ) -> QueryUnderstanding:
         """Understand a runtime query in one validated, retryable model call.
 
         ``history`` holds earlier chat turns so follow-up questions can be
-        resolved into a standalone interpretation.
+        resolved into a standalone interpretation; ``memory`` is the chat's
+        running incident summary, covering turns older than that window.
         """
 
         payload: dict[str, Any] = {"query": query}
         if history:
             payload["conversation_history"] = history
+        if memory:
+            payload["incident_summary"] = memory
         return self._structured(
             QUERY_UNDERSTANDING_SYSTEM_PROMPT, payload, QueryUnderstanding
+        )
+
+    def update_incident_memory(
+        self,
+        previous: dict[str, Any] | None,
+        user_message: str,
+        assistant_reply: str,
+    ) -> IncidentMemory:
+        """Merge one chat turn into the running summary of the user's problem."""
+
+        payload = {
+            "previous_summary": previous or {},
+            "user_message": user_message,
+            "assistant_reply": assistant_reply,
+        }
+        supplied_text = json.dumps(payload, ensure_ascii=False)
+        supplied_folded = supplied_text.casefold()
+
+        def check(memory: IncidentMemory) -> str | None:
+            for error in memory.error_messages:
+                if json.dumps(error, ensure_ascii=False)[1:-1].casefold() not in supplied_folded:
+                    return f"error message {error!r} is not verbatim from the payload"
+            values = [
+                memory.problem,
+                memory.open_question,
+                *memory.components,
+                *memory.versions,
+                *memory.observations,
+                *memory.ruled_out,
+                *memory.findings,
+            ]
+            for value in values:
+                if value and (reason := ungrounded_reply_reason(value, supplied_text)):
+                    return f"{value!r}: {reason}"
+            return None
+
+        return self._structured(
+            MEMORY_UPDATE_SYSTEM_PROMPT, payload, IncidentMemory, check
         )
 
     def classify_query(self, normalized: NormalizedQuery) -> IntentClassification:

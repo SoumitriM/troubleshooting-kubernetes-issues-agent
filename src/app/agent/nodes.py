@@ -111,11 +111,15 @@ class IncidentNodes:
         understanding_unavailable = False
         try:
             history = state.get("conversation_history") or []
-            analysis = (
-                self._llm.analyze_query(query, history=history)
-                if history
-                else self._llm.analyze_query(query)
-            )
+            memory = state.get("incident_memory") or {}
+            # Optional context is passed only when present, so simple test
+            # doubles with a narrower signature keep working.
+            context: dict[str, Any] = {}
+            if history:
+                context["history"] = history
+            if memory:
+                context["memory"] = memory
+            analysis = self._llm.analyze_query(query, **context)
             if not self._preserves_technical_tokens(query, analysis.normalized_query):
                 # The structured interpretation is still usable; only the rewritten
                 # text is untrusted, so retrieval falls back to the user's wording.

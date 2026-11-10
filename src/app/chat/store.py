@@ -23,7 +23,8 @@ class ConversationStore:
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                memory TEXT NOT NULL DEFAULT '{}'
             );
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,6 +51,12 @@ class ConversationStore:
             await self._connection.execute(
                 "ALTER TABLE chat_messages "
                 "ADD COLUMN suggestions TEXT NOT NULL DEFAULT '[]'"
+            )
+        cursor = await self._connection.execute("PRAGMA table_info(conversations)")
+        if "memory" not in {row[1] for row in await cursor.fetchall()}:
+            # Databases created before the running incident summary existed.
+            await self._connection.execute(
+                "ALTER TABLE conversations ADD COLUMN memory TEXT NOT NULL DEFAULT '{}'"
             )
         await self._connection.commit()
 
@@ -150,6 +157,22 @@ class ConversationStore:
             "suggestions": suggestions or [],
             "created_at": now,
         }
+
+    async def memory(self, conversation_id: str) -> dict[str, Any]:
+        """The conversation's running incident summary ({} when none yet)."""
+
+        cursor = await self._connection.execute(
+            "SELECT memory FROM conversations WHERE id = ?", (conversation_id,)
+        )
+        row = await cursor.fetchone()
+        return json.loads(row[0]) if row else {}
+
+    async def set_memory(self, conversation_id: str, memory: dict[str, Any]) -> None:
+        await self._connection.execute(
+            "UPDATE conversations SET memory = ? WHERE id = ?",
+            (json.dumps(memory), conversation_id),
+        )
+        await self._connection.commit()
 
     async def delete(self, conversation_id: str) -> bool:
         await self._connection.execute(

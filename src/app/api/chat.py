@@ -25,11 +25,15 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 # turns are kept for display but not sent to the model.
 HISTORY_MESSAGES = 6
 HISTORY_MESSAGE_CHARS = 1500
+# The running incident summary is updated from at most this much reply text.
+MEMORY_REPLY_CHARS = 3000
 UNAVAILABLE = "Chat service is temporarily unavailable"
 
 # One turn at a time per conversation keeps history and clarification state
 # consistent when a client sends messages concurrently.
 _conversation_locks: dict[str, asyncio.Lock] = {}
+# Strong references keep background summary updates from being collected.
+_memory_tasks: set[asyncio.Task[None]] = set()
 
 
 @router.post("", response_model=ChatResponse)
@@ -50,12 +54,17 @@ async def send_message(payload: ChatRequest, request: Request) -> ChatResponse:
                     detail="Conversation was not found",
                 )
             await store.append(conversation_id, "user", payload.message)
+            memory = await store.memory(conversation_id) if previous else {}
             thread_id, result = await _run_turn(
-                workflow, conversation_id, payload.message, previous
+                workflow, conversation_id, payload.message, previous, memory
             )
             reply = _assistant_fields(result)
             message = await store.append(
                 conversation_id, "assistant", thread_id=thread_id, **reply
+            )
+            _schedule_memory_update(
+                request, store, lock, conversation_id, memory,
+                payload.message, reply["content"],
             )
         except HTTPException:
             raise
@@ -101,11 +110,56 @@ async def delete_conversation(conversation_id: str, request: Request) -> None:
     _conversation_locks.pop(conversation_id, None)
 
 
+def _schedule_memory_update(
+    request: Request,
+    store: ConversationStore,
+    lock: asyncio.Lock,
+    conversation_id: str,
+    previous: dict[str, Any],
+    user_message: str,
+    assistant_reply: str,
+) -> None:
+    """Merge this turn into the running summary after the reply is sent.
+
+    The task waits for the conversation lock, which the current turn still
+    holds, and the lock is first-come first-served: the next message in the
+    conversation therefore always sees the updated summary, while this reply
+    is not delayed by the extra model call.
+    """
+
+    summarizer = getattr(request.app.state, "incident_summarizer", None)
+    updater = getattr(summarizer, "update_incident_memory", None)
+    if updater is None:
+        return
+
+    async def update() -> None:
+        async with lock:
+            try:
+                memory = await asyncio.to_thread(
+                    updater,
+                    previous,
+                    user_message,
+                    assistant_reply[:MEMORY_REPLY_CHARS],
+                )
+                if await store.exists(conversation_id):
+                    await store.set_memory(
+                        conversation_id, memory.model_dump(exclude_defaults=True)
+                    )
+            except Exception:
+                # The previous summary stays; memory is a convenience.
+                LOGGER.warning("Incident summary update failed; keeping the previous one")
+
+    task = asyncio.create_task(update())
+    _memory_tasks.add(task)
+    task.add_done_callback(_memory_tasks.discard)
+
+
 async def _run_turn(
     workflow: Any,
     conversation_id: str,
     message: str,
     previous: list[dict[str, Any]],
+    memory: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Answer a pending clarification, or start a new workflow thread."""
 
@@ -129,6 +183,7 @@ async def _run_turn(
             "clarification_history": [],
             "clarification_attempts": 0,
             "conversation_history": history,
+            "incident_memory": memory or {},
         },
         {"configurable": {"thread_id": thread_id}},
     )

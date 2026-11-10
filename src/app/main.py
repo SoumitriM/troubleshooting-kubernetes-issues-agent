@@ -35,6 +35,8 @@ LOGGER = logging.getLogger(__name__)
 class AgentResources:
     workflow: Any
     driver: Driver
+    # Maintains each chat's running incident summary; None disables it.
+    summarizer: Any = None
 
 
 def build_agent_resources(checkpointer: Any | None = None) -> AgentResources:
@@ -70,9 +72,10 @@ def build_agent_resources(checkpointer: Any | None = None) -> AgentResources:
             documentation_store.preload()
         except Exception:
             LOGGER.exception("Documentation index could not be preloaded")
+        llm = ClaudeClient(ClaudeSettings())
         workflow = build_workflow(
             IncidentNodes(
-                ClaudeClient(ClaudeSettings()),
+                llm,
                 GraphRetriever(driver, embedder),
                 agent_settings,
                 analytics_repository=GraphAnalyticsRepository(driver),
@@ -83,7 +86,7 @@ def build_agent_resources(checkpointer: Any | None = None) -> AgentResources:
             ),
             checkpointer=checkpointer,
         )
-        return AgentResources(workflow=workflow, driver=driver)
+        return AgentResources(workflow=workflow, driver=driver, summarizer=llm)
     except Exception:
         driver.close()
         raise
@@ -98,6 +101,7 @@ def create_app(
         application.state.neo4j_driver = None
         application.state.incident_checkpointer = None
         application.state.conversation_store = None
+        application.state.incident_summarizer = None
         checkpoint_connection = None
         chat_connection = None
         try:
@@ -132,6 +136,7 @@ def create_app(
                     await candidate if inspect.isawaitable(candidate) else candidate
                 )
             application.state.incident_workflow = resources.workflow
+            application.state.incident_summarizer = resources.summarizer
             application.state.neo4j_driver = resources.driver
         except Exception:
             LOGGER.exception("Incident analysis dependencies unavailable at startup")
