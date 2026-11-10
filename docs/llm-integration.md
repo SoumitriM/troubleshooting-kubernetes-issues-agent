@@ -14,6 +14,7 @@ System prompts are in [`prompts.py`](../src/app/enrichment/prompts.py).
 | `verify_incident_matches` | Incident route, after reranking | `IncidentMatchVerification` |
 | `research_step` | Research route, once per step (at most five) | `ResearchStep` |
 | `generate_grounded_fix` | Incident route, when a verified fix exists | `GroundedFixAnswer` |
+| `troubleshoot_from_docs` | Incident route, first for every incident; GitHub evidence is passed as secondary input | `DocsTroubleshootingAnswer` |
 | `compose_reply` | Clarification, scope, incident and analytics replies (see [Conversational replies](#conversational-replies)) | `ComposedReply` |
 | `enrich` | `app.enrichment.cli` | `IssueEnrichment` |
 | `extract_resolution` | `app.enrichment.resolution_cli` | `IssueResolution` |
@@ -98,6 +99,7 @@ exactly as stored.
 | Method | The reply is rejected if |
 |---|---|
 | `generate_grounded_fix` | The summary is not one of the supplied resolution summaries, or any step or citation was not supplied |
+| `troubleshoot_from_docs` | An answerable reply cites no chunk or a non-chunk URL, mentions reported issues, issue numbers or a match, or has a number, version or code span absent from the payload |
 | `compose_reply` | The reply or a suggestion has a URL, or an issue number, number, version or code span absent from the payload; a citation was not supplied; or an out-of-scope suggestion is not one of the example questions |
 | `answer_documentation_question` | A citation is not the source URL of a retrieved chunk |
 | `extract_resolution` | An evidence URL does not appear in the issue's comments, PRs or commits |

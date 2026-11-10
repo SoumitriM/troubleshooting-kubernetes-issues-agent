@@ -13,6 +13,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.agent.state import (
     ComposedReply,
     CypherGeneration,
+    DocsTroubleshootingAnswer,
     GroundedFixAnswer,
     IncidentMatchVerification,
     IntentClassification,
@@ -26,6 +27,7 @@ from app.enrichment.prompts import (
     COMPOSE_REPLY_SYSTEM_PROMPT,
     CYPHER_SYSTEM_PROMPT,
     DOCUMENTATION_ANSWER_SYSTEM_PROMPT,
+    DOCS_TROUBLESHOOTING_SYSTEM_PROMPT,
     FIX_ANSWER_SYSTEM_PROMPT,
     INCIDENT_MATCH_SYSTEM_PROMPT,
     INTENT_SYSTEM_PROMPT,
@@ -64,6 +66,10 @@ _ISSUE_REF = re.compile(r"#(\d+)")
 _MATCH_FRAMING = re.compile(
     r"\b(?:this|it|that) (?:closely )?match(?:es|ed)\b|\bclosest match\b"
     r"|\bin that (?:report|issue|cluster)\b",
+    re.IGNORECASE,
+)
+_REPORTED_ISSUES = re.compile(
+    r"\breported (?:issue|problem|incident)s?\b|\b(?:could ?n[o']t|did ?n[o']t) find\b",
     re.IGNORECASE,
 )
 _NUMBER = re.compile(r"\d+(?:[.,:]\d+)*")
@@ -356,6 +362,59 @@ class ClaudeClient:
 
         return self._structured(
             COMPOSE_REPLY_SYSTEM_PROMPT, payload, ComposedReply, check
+        )
+
+    def troubleshoot_from_docs(
+        self,
+        report: str,
+        chunks: list[dict[str, Any]],
+        *,
+        diagnostic_commands: list[str],
+        known_details: dict[str, Any] | None = None,
+        cross_version_note: str | None = None,
+        incident_evidence: dict[str, Any] | None = None,
+    ) -> DocsTroubleshootingAnswer:
+        """Troubleshoot from the docs, with GitHub evidence as secondary input."""
+
+        payload: dict[str, Any] = {
+            "incident_report": report,
+            "known_details": known_details or {},
+            "documentation_chunks": chunks,
+            "diagnostic_commands": diagnostic_commands,
+        }
+        if cross_version_note:
+            payload["cross_version_note"] = cross_version_note
+        if incident_evidence:
+            payload["incident_evidence"] = incident_evidence
+        supplied_text = json.dumps(payload, ensure_ascii=False)
+        # Issue links are appended by the workflow; the answer cites docs only.
+        allowed_urls = {chunk["source_url"] for chunk in chunks}
+
+        def check(output: DocsTroubleshootingAnswer) -> str | None:
+            if not output.answerable:
+                return None
+            if not output.answer.strip():
+                return "an answerable response requires an answer"
+            if not output.citations:
+                return "cite the documentation chunks you used"
+            if not set(output.citations).issubset(allowed_urls):
+                return "response contains unsupported citation"
+            if _REPORTED_ISSUES.search(output.answer):
+                return "do not mention reported issues or that nothing was found"
+            if _ISSUE_REF.search(output.answer) or _MATCH_FRAMING.search(output.answer):
+                return (
+                    "help with the user's problem; do not mention issue numbers "
+                    "or say the report matches another issue"
+                )
+            return ungrounded_reply_reason(
+                output.answer, supplied_text
+            ) or ungrounded_suggestion_reason(output.suggestions, supplied_text)
+
+        return self._structured(
+            DOCS_TROUBLESHOOTING_SYSTEM_PROMPT,
+            payload,
+            DocsTroubleshootingAnswer,
+            check,
         )
 
     def normalize_query(self, query: str) -> NormalizedQuery:

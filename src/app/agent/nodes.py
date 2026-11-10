@@ -167,6 +167,7 @@ class IncidentNodes:
             "cypher_validation_errors": [],
             "suggestions": [],
             "clarification_question": "",
+            "docs_troubleshooting_failed": False,
         }
 
     def _converse(
@@ -181,17 +182,18 @@ class IncidentNodes:
         composer = getattr(self._llm, "compose_reply", None)
         if composer is None or state.get("query_understanding_unavailable"):
             return None
-        original = state.get("original_query") or state.get("user_query", "")
-        user_message = "\n".join(
-            [original, *state.get("clarification_history", [])]
-        )
-        try:
-            composed = composer(
-                situation,
-                user_message=user_message,
-                facts=facts,
-                history=state.get("conversation_history") or None,
+        if state.get("conversation_history"):
+            # The standalone rewrite already resolves follow-up references.
+            # Raw history is not sent, so an earlier topic cannot leak into
+            # this reply.
+            user_message = state.get("normalized_query") or state.get("user_query", "")
+        else:
+            original = state.get("original_query") or state.get("user_query", "")
+            user_message = "\n".join(
+                [original, *state.get("clarification_history", [])]
             )
+        try:
+            composed = composer(situation, user_message=user_message, facts=facts)
         except Exception:
             LOGGER.warning("Reply composer unavailable for situation=%s", situation)
             return None
@@ -963,6 +965,127 @@ class IncidentNodes:
             ),
             "actionable_fix_available": False,
         }
+
+    def troubleshoot_from_docs(self, state: IncidentState) -> dict[str, Any]:
+        """Troubleshoot an incident with the documentation as the primary source.
+
+        The docs explain likely causes and checks. GitHub issues that passed
+        ``assess_evidence`` are secondary, incident-specific evidence: verified
+        fix steps or similar reports are appended verbatim under the docs
+        answer. When the docs cannot explain the problem, the incident follows
+        the GitHub-only route that ``assess_evidence`` chose (fix, findings or
+        clarification).
+        """
+
+        failed = {"docs_troubleshooting_failed": True}
+        troubleshooter = getattr(self._llm, "troubleshoot_from_docs", None)
+        if (
+            troubleshooter is None
+            or self._documentation_retriever is None
+            or state.get("query_understanding_unavailable")
+        ):
+            return failed
+        try:
+            chunks = self._documentation_retriever.search(
+                state["normalized_query"], limit=6
+            )
+        except Exception:
+            LOGGER.warning("Documentation lookup for troubleshooting failed")
+            return failed
+        if not chunks:
+            return failed
+        cross_version_note = (
+            "A similar symptom was reported in another Kubernetes version; its "
+            "resolution must not be assumed to apply."
+            if state.get("retrieved_context", {}).get("cross_version_matches")
+            else None
+        )
+        evidence, appendix, evidence_urls = self._incident_evidence(state)
+        try:
+            result = troubleshooter(
+                state["normalized_query"],
+                chunks,
+                diagnostic_commands=DIAGNOSTIC_COMMANDS,
+                known_details=self._known_details(state),
+                cross_version_note=cross_version_note,
+                incident_evidence=evidence,
+            )
+        except Exception:
+            LOGGER.warning("Documentation troubleshooting unavailable")
+            return failed
+        if not result.answerable:
+            return failed
+        uses_issues = bool(evidence)
+        route = state.get("route") if uses_issues else "docs_troubleshooting"
+        return {
+            "answer": result.answer + (f"\n\n{appendix}" if appendix else ""),
+            "citations": self._unique([*result.citations, *evidence_urls]),
+            "suggestions": result.suggestions,
+            "route": route,
+            "route_reason": (
+                "documentation explains likely causes"
+                + ("; GitHub issues add incident-specific evidence" if uses_issues else "")
+            ),
+            "actionable_fix_available": route == "generate_fix",
+            "docs_troubleshooting_failed": False,
+        }
+
+    def _incident_evidence(
+        self, state: IncidentState
+    ) -> tuple[dict[str, Any] | None, str, list[str]]:
+        """GitHub evidence for the docs answer: model facts, verbatim appendix, URLs.
+
+        Only issues that passed ``assess_evidence`` are used, so the docs answer
+        never cites a report the incident route would have rejected.
+        """
+
+        context = state.get("retrieved_context", {})
+        route = state.get("route")
+        if route == "generate_fix":
+            fixes = self._actionable_fixes(context)
+            if fixes:
+                fix = fixes[0]
+                issue = next(
+                    (
+                        item
+                        for item in [
+                            *context.get("matched_issues", []),
+                            *context.get("related_issues", []),
+                        ]
+                        if item.get("actionable_fix") is fix
+                    ),
+                    {},
+                )
+                steps = "\n".join(f"- {step}" for step in fix["verified_steps"])
+                return (
+                    {
+                        "verified_fix": {
+                            "summary": fix.get("resolution_summary"),
+                            "root_cause": (issue.get("verified_disposition") or {}).get(
+                                "root_cause"
+                            ),
+                            "steps_shown_below": fix["verified_steps"],
+                        },
+                        "reported_failure": self._issue_facts(issue),
+                    },
+                    "**Verified steps** (from a resolved GitHub report):\n" + steps,
+                    list(fix.get("evidence_urls", [])),
+                )
+        if route in {"generate_fix", "generate_findings"}:
+            matched = context.get("matched_issues", [])[:5]
+            related = context.get("related_issues", [])[:3]
+            issues = [*matched, *related]
+            if issues:
+                return (
+                    {
+                        "similar_failures": [self._issue_facts(item) for item in issues],
+                        "verified_fix_available": False,
+                    },
+                    "**Similar GitHub reports** (no verified fix yet):\n"
+                    + "\n".join(self._format_finding(item) for item in issues),
+                    self._unique(url for item in issues for url in self._finding_urls(item)),
+                )
+        return None, "", []
 
     def prepare_clarification(self, state: IncidentState) -> dict[str, Any]:
         """Compose the conversational clarification before the interrupt.

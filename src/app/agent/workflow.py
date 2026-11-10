@@ -19,6 +19,7 @@ def build_workflow(
     graph.add_node("assess_evidence", nodes.assess_evidence)
     graph.add_node("generate_fix", nodes.generate_fix)
     graph.add_node("generate_findings", nodes.generate_findings)
+    graph.add_node("troubleshoot_from_docs", nodes.troubleshoot_from_docs)
     graph.add_node("prepare_clarification", nodes.prepare_clarification)
     graph.add_node("request_clarification", nodes.request_clarification)
     graph.add_node("generate_cypher", nodes.generate_cypher)
@@ -64,10 +65,15 @@ def build_workflow(
         },
     )
     graph.add_edge("retrieve_evidence", "assess_evidence")
+    # The docs are the primary troubleshooting source for every incident;
+    # GitHub evidence chosen by assess_evidence is attached to that answer.
+    graph.add_edge("assess_evidence", "troubleshoot_from_docs")
     graph.add_conditional_edges(
-        "assess_evidence",
-        route_after_assessment,
+        "troubleshoot_from_docs",
+        route_after_docs_troubleshooting,
         {
+            "end": END,
+            # The docs could not explain the problem: use the GitHub-only route.
             "generate_fix": "generate_fix",
             "generate_findings": "generate_findings",
             "request_clarification": "prepare_clarification",
@@ -156,3 +162,9 @@ def route_after_clarification(state: IncidentState) -> str:
     if state.get("clarification_exhausted") or state.get("answer"):
         return "end"
     return "understand_query"
+
+
+def route_after_docs_troubleshooting(state: IncidentState) -> str:
+    if not state.get("docs_troubleshooting_failed"):
+        return "end"
+    return state["route"]

@@ -17,6 +17,7 @@ Route = Literal[
     "research_answer",
     "generate_fix",
     "generate_findings",
+    "docs_troubleshooting",
     "answer_from_graph",
     "general_answer",
     "request_clarification",
@@ -174,6 +175,9 @@ class IncidentState(TypedDict, total=False):
     # Conversational question prepared before the clarification interrupt, so
     # the model call is not repeated when LangGraph re-runs the paused node.
     clarification_question: str
+    # No reported issue matched and the docs could not answer either, so the
+    # turn falls back to a clarifying question.
+    docs_troubleshooting_failed: bool
 
 
 class IncidentMatchJudgement(BaseModel):
@@ -242,6 +246,27 @@ class ComposedReply(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reply: str = Field(min_length=1, max_length=2000)
+    citations: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+
+    @field_validator("citations")
+    @classmethod
+    def unique_citations(cls, citations: list[str]) -> list[str]:
+        return list(dict.fromkeys(citations))
+
+    @field_validator("suggestions")
+    @classmethod
+    def validate_suggestions(cls, suggestions: list[str]) -> list[str]:
+        return clean_suggestions(suggestions)
+
+
+class DocsTroubleshootingAnswer(BaseModel):
+    """Likely causes for an unmatched incident, taken from documentation chunks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    answerable: bool
+    answer: str = Field(default="", max_length=4000)
     citations: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
 

@@ -156,7 +156,7 @@ validation twice ends with a request to rephrase.
    If every candidate is unrelated, the request goes to clarification with
    "no close match". Verification can only narrow the rule-based result; if
    the Claude call fails, the reranked matches are used unchanged.
-3. `assess_evidence` chooses the route:
+3. `assess_evidence` chooses which GitHub evidence is usable:
    - `generate_fix` when the top score is at least
      `AGENT_ACTIONABLE_FIX_THRESHOLD` and a match carries a verified `fixed` or
      `configuration` resolution with steps and evidence URLs. Claude's summary,
@@ -165,6 +165,17 @@ validation twice ends with a request to rephrase.
      (`AGENT_RELEVANCE_THRESHOLD`) but no verified fix exists. Direct and
      graph-expanded matches are listed separately with their issue URLs.
    - `request_clarification` otherwise.
+
+4. `troubleshoot_from_docs` makes the official documentation the primary
+   troubleshooting source. It retrieves six documentation chunks and asks
+   Claude for the likely causes and how to check each, grounded in those
+   chunks, ending with one question that narrows the cause down. The GitHub
+   evidence from step 3 is secondary and incident-specific: verified fix steps
+   or a list of similar reports are appended verbatim under the docs answer,
+   with their links as citations, and the route stays `generate_fix` or
+   `generate_findings`. With no usable GitHub evidence the route is
+   `docs_troubleshooting`. If the docs cannot explain the problem, the incident
+   falls back to the GitHub-only route from step 3.
 
 ### Clarification
 

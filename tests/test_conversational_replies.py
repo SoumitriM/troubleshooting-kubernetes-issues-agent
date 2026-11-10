@@ -9,7 +9,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agent.checkpointing import strict_checkpoint_serializer
 from app.agent.nodes import AgentSettings, IncidentNodes
-from app.agent.state import ComposedReply
+from app.agent.state import ComposedReply, DocsTroubleshootingAnswer, QueryUnderstanding
 from app.agent.workflow import build_workflow
 from app.chat.store import ConversationStore
 from app.enrichment.claude_client import EnrichmentResponseError, ungrounded_reply_reason
@@ -295,3 +295,174 @@ def test_incident_reply_that_narrates_the_match_is_retried() -> None:
     assert composed.reply.startswith("Your master VM likely failed")
     retry_system = api.beta.messages.create.call_args_list[1].kwargs["system"]
     assert "do not mention issue numbers" in retry_system
+
+
+IMAGE_DOC = {
+    "title": "Images",
+    "section": "ImagePullBackOff",
+    "text": (
+        "A status of ImagePullBackOff means a container could not start because "
+        "Kubernetes could not pull a container image, for reasons such as an "
+        "invalid image name or pulling from a private registry without "
+        "imagePullSecret."
+    ),
+    "source_url": "https://kubernetes.io/docs/concepts/containers/images/",
+}
+
+
+class NoMatchRetriever:
+    def search(self, **_kwargs: Any) -> dict[str, Any]:
+        return {"matched_issues": [], "related_issues": [], "no_close_match": True}
+
+
+class Docs:
+    def __init__(self, chunks: list[dict[str, Any]]) -> None:
+        self.chunks = chunks
+
+    def search(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        return self.chunks[:limit]
+
+
+class TroubleshootingLLM(ComposingLLM):
+    def __init__(self, answerable: bool) -> None:
+        super().__init__()
+        self.answerable = answerable
+        self.troubleshoot_calls: list[str] = []
+        self.composer_messages: list[str] = []
+
+    def analyze_query(self, query: str, history=None):  # type: ignore[override]
+        self.histories.append(history)
+        return QueryUnderstanding(
+            normalized_query="A new Deployment cannot pull its container image",
+            intent="INCIDENT_TROUBLESHOOTING",
+            intent_confidence=0.9,
+            components=["deployment"],
+            symptoms=["cannot pull container image"],
+            observed_behavior="cannot pull container image",
+            has_concrete_incident=True,
+            reasoning="test",
+        )
+
+    def compose_reply(self, situation, *, user_message, facts, history=None):  # type: ignore[override]
+        assert history is None
+        self.composer_messages.append(user_message)
+        return super().compose_reply(situation, user_message=user_message, facts=facts)
+
+    def troubleshoot_from_docs(self, report, chunks, **_kwargs: Any) -> DocsTroubleshootingAnswer:
+        self.troubleshoot_calls.append(report)
+        if not self.answerable:
+            return DocsTroubleshootingAnswer(answerable=False)
+        return DocsTroubleshootingAnswer(
+            answerable=True,
+            answer="Your pods can't pull the image.\n- Wrong image name\n- Missing imagePullSecret\nWhich event reason do you see?",
+            citations=[chunks[0]["source_url"]],
+            suggestions=["How do imagePullSecrets work?"],
+        )
+
+
+def troubleshooting_app(llm: TroubleshootingLLM) -> Any:
+    workflow = build_workflow(
+        IncidentNodes(
+            llm,  # type: ignore[arg-type]
+            NoMatchRetriever(),  # type: ignore[arg-type]
+            AgentSettings(_env_file=None),
+            documentation_retriever=Docs([IMAGE_DOC]),  # type: ignore[arg-type]
+            enable_interrupts=True,
+        ),
+        checkpointer=InMemorySaver(serde=strict_checkpoint_serializer()),
+    )
+    return create_app(lambda: AgentResources(workflow=workflow, driver=MagicMock()))
+
+
+def test_unmatched_incident_is_answered_from_the_docs() -> None:
+    llm = TroubleshootingLLM(answerable=True)
+    with TestClient(troubleshooting_app(llm)) as http:
+        message = http.post(
+            "/api/chat", json={"message": "a new deployment cannot download its image"}
+        ).json()["message"]
+
+    assert message["status"] == "completed"
+    assert message["route"] == "docs_troubleshooting"
+    assert "Missing imagePullSecret" in message["content"]
+    assert message["citations"] == [IMAGE_DOC["source_url"]]
+    assert message["suggestions"] == ["How do imagePullSecrets work?"]
+    assert llm.compose_calls == []
+
+
+def test_docs_that_cannot_explain_the_problem_fall_back_to_a_question() -> None:
+    llm = TroubleshootingLLM(answerable=False)
+    with TestClient(troubleshooting_app(llm)) as http:
+        message = http.post(
+            "/api/chat", json={"message": "a new deployment cannot download its image"}
+        ).json()["message"]
+
+    assert message["status"] == "needs_clarification"
+    assert len(llm.troubleshoot_calls) == 1
+    assert [situation for situation, _ in llm.compose_calls] == ["clarify"]
+
+
+def test_composer_gets_the_standalone_question_not_earlier_topics() -> None:
+    llm = TroubleshootingLLM(answerable=True)
+    with TestClient(troubleshooting_app(llm)) as http:
+        first = http.post("/api/chat", json={"message": "pods get OOM killed"}).json()
+        assert first["message"]["status"] == "completed"
+        # A new topic starts a new thread that carries conversation history.
+        llm.answerable = False
+        http.post(
+            "/api/chat",
+            json={
+                "message": "new deployment cannot pull its image",
+                "conversation_id": first["conversation_id"],
+            },
+        )
+
+    assert llm.histories[-1]  # history reached query understanding
+    assert llm.composer_messages == [
+        "A new Deployment cannot pull its container image"
+    ]
+
+
+def test_docs_troubleshooting_rejects_talk_of_reported_issues_and_invented_commands() -> None:
+    url = IMAGE_DOC["source_url"]
+    bad_phrase = (
+        '{"answerable":true,"answer":"I couldn\'t find a reported issue. Check names.",'
+        '"citations":["' + url + '"],"suggestions":[]}'
+    )
+    bad_command = (
+        '{"answerable":true,"answer":"Run `crictl pull nginx`.",'
+        '"citations":["' + url + '"],"suggestions":[]}'
+    )
+    claude, _api = client(response(bad_phrase), response(bad_command))
+
+    with pytest.raises(EnrichmentResponseError, match="does not appear in the payload"):
+        claude.troubleshoot_from_docs(
+            "image pull fails", [IMAGE_DOC], diagnostic_commands=["kubectl get nodes"]
+        )
+    retry_system = _api.beta.messages.create.call_args_list[1].kwargs["system"]
+    assert "do not mention reported issues" in retry_system
+
+
+def test_docs_lead_and_github_reports_are_attached_as_secondary_evidence() -> None:
+    llm = TroubleshootingLLM(answerable=True)
+    workflow = build_workflow(
+        IncidentNodes(
+            llm,  # type: ignore[arg-type]
+            ConversationRetriever(),  # type: ignore[arg-type]
+            AgentSettings(_env_file=None),
+            documentation_retriever=Docs([IMAGE_DOC]),  # type: ignore[arg-type]
+            enable_interrupts=True,
+        ),
+        checkpointer=InMemorySaver(serde=strict_checkpoint_serializer()),
+    )
+    app = create_app(lambda: AgentResources(workflow=workflow, driver=MagicMock()))
+    with TestClient(app) as http:
+        message = http.post("/api/chat", json={"message": GC_REPORT}).json()["message"]
+
+    assert message["route"] == "generate_findings"
+    docs_part, github_part = message["content"].split("**Similar GitHub reports**")
+    assert "Missing imagePullSecret" in docs_part
+    assert "#141382" in github_part
+    assert message["citations"] == [
+        IMAGE_DOC["source_url"],
+        "https://github.com/kubernetes/kubernetes/issues/141382",
+    ]

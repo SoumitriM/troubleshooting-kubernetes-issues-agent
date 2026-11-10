@@ -426,17 +426,22 @@
       "category": "clarification",
       "query": "My kubelet started crashing after upgrading to v1.35",
       "expect": {
-        "status": "needs_clarification",
+        "status": [
+          "needs_clarification",
+          "completed"
+        ],
         "intent": "INCIDENT_TROUBLESHOOTING",
-        "route": "request_clarification",
+        "route": [
+          "request_clarification",
+          "docs_troubleshooting"
+        ],
         "answer_contains": [
-          "kubelet",
-          "v1.35"
+          "kubelet"
         ],
         "answer_not_contains": [
-          "Verified steps"
-        ],
-        "max_citations": 0
+          "Verified steps",
+          "reported issue"
+        ]
       }
     },
     {
@@ -537,6 +542,24 @@
           "issues/140353",
           "kubernetes.io/docs/"
         ]
+      }
+    },
+    {
+      "id": "incident-docs-01",
+      "category": "incident_docs",
+      "query": "A new deployment cannot download its container image. What are the likely reasons?",
+      "expect": {
+        "status": "completed",
+        "intent": "INCIDENT_TROUBLESHOOTING",
+        "route": "docs_troubleshooting",
+        "answer_contains": [
+          "image"
+        ],
+        "answer_not_contains": [
+          "reported issue"
+        ],
+        "min_citations": 1,
+        "citations_prefix": "https://kubernetes.io/"
       }
     }
   ]
