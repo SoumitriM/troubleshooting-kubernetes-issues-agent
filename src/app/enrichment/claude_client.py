@@ -146,6 +146,18 @@ class CypherGenerationOutput(BaseModel):
     explanation: str = Field(min_length=1, max_length=500)
 
 
+def ungrounded_suggestion_reason(
+    suggestions: list[str], supplied_text: str
+) -> str | None:
+    """Apply the reply grounding check to each follow-up suggestion."""
+
+    for suggestion in suggestions:
+        reason = ungrounded_reply_reason(suggestion, supplied_text)
+        if reason:
+            return f"suggestion {suggestion!r}: {reason}"
+    return None
+
+
 class ClaudeClient:
     """Run every structured model call through Claude with validated outputs."""
 
@@ -266,13 +278,21 @@ class ClaudeClient:
     ) -> ResearchStep:
         """Choose the next read-only tool call, or answer from the observations."""
 
+        payload = {
+            "question": question,
+            "remaining_tool_calls": remaining_tool_calls,
+            "observations": observations,
+        }
+
         def check(step: ResearchStep) -> str | None:
             if step.action == "final_answer":
                 if not step.answer:
                     return "final_answer requires an answer"
                 if not set(step.citations).issubset(allowed_urls):
                     return "response contains unsupported citation"
-                return None
+                return ungrounded_suggestion_reason(
+                    step.suggestions, json.dumps(payload, ensure_ascii=False)
+                )
             if remaining_tool_calls <= 0:
                 return "no tool calls remain; return final_answer"
             if step.action in {"search_incidents", "search_docs"} and not step.query:
@@ -283,11 +303,7 @@ class ClaudeClient:
 
         return self._structured(
             RESEARCH_SYSTEM_PROMPT,
-            {
-                "question": question,
-                "remaining_tool_calls": remaining_tool_calls,
-                "observations": observations,
-            },
+            payload,
             ResearchStep,
             check,
         )
@@ -312,10 +328,18 @@ class ClaudeClient:
         supplied_text = json.dumps(payload, ensure_ascii=False)
         allowed_urls = self._collect_supplied_urls(facts)
 
+        examples = facts.get("example_questions")
+
         def check(output: ComposedReply) -> str | None:
             if not set(output.citations).issubset(allowed_urls):
                 return "response contains unsupported citation"
-            return ungrounded_reply_reason(output.reply, supplied_text)
+            if situation in {"out_of_scope", "graph_failed"} and not set(
+                output.suggestions
+            ).issubset(examples or []):
+                return "suggestions must be copied from facts.example_questions"
+            return ungrounded_reply_reason(
+                output.reply, supplied_text
+            ) or ungrounded_suggestion_reason(output.suggestions, supplied_text)
 
         return self._structured(
             COMPOSE_REPLY_SYSTEM_PROMPT, payload, ComposedReply, check
@@ -385,14 +409,17 @@ class ClaudeClient:
     ) -> GroundedDocumentationAnswer:
         allowed_urls = {chunk["source_url"] for chunk in chunks}
 
+        payload = {"query": query, "documentation_chunks": chunks}
+        supplied_text = json.dumps(payload, ensure_ascii=False)
+
         def check(answer: GroundedDocumentationAnswer) -> str | None:
             if not set(answer.citations).issubset(allowed_urls):
                 return "response contains unsupported citation"
-            return None
+            return ungrounded_suggestion_reason(answer.suggestions, supplied_text)
 
         return self._structured(
             DOCUMENTATION_ANSWER_SYSTEM_PROMPT,
-            {"query": query, "documentation_chunks": chunks},
+            payload,
             GroundedDocumentationAnswer,
             check,
         )

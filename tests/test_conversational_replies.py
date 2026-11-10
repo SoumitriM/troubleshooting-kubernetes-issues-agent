@@ -219,3 +219,59 @@ def test_store_setup_adds_suggestions_to_an_existing_database(tmp_path) -> None:
 
     messages = asyncio.run(scenario())
     assert [message["suggestions"] for message in messages] == [[], ["Next?"]]
+
+
+def test_suggestion_naming_an_unsupplied_version_is_retried() -> None:
+    claude, api = client(
+        response(
+            '{"reply":"kubelet leads with 13.","citations":[],'
+            '"suggestions":["Show kubelet issues in v1.29"]}'
+        ),
+        response(
+            '{"reply":"kubelet leads with 13.","citations":[],'
+            '"suggestions":["Show me the kubelet issues"]}'
+        ),
+    )
+
+    composed = claude.compose_reply(
+        "analytics",
+        user_message="top components",
+        facts={"rows": [{"component": "kubelet", "issue_count": 13}]},
+    )
+
+    assert composed.suggestions == ["Show me the kubelet issues"]
+    retry_system = api.beta.messages.create.call_args_list[1].kwargs["system"]
+    assert "suggestion 'Show kubelet issues in v1.29'" in retry_system
+
+
+def test_out_of_scope_suggestions_must_come_from_the_example_list() -> None:
+    invented = (
+        '{"reply":"I only cover Kubernetes.","citations":[],'
+        '"suggestions":["How do I tune etcd compaction?"]}'
+    )
+    claude, _api = client(response(invented), response(invented))
+
+    with pytest.raises(EnrichmentResponseError, match="example_questions"):
+        claude.compose_reply(
+            "out_of_scope",
+            user_message="capital of France?",
+            facts={"example_questions": ["What does the kubelet do?"]},
+        )
+
+
+def test_documentation_suggestions_are_checked_against_the_chunks() -> None:
+    chunk = {"text": "The kubelet is the node agent.", "source_url": "https://kubernetes.io/k"}
+    claude, _api = client(
+        response(
+            '{"answer":"It is the node agent.","citations":["https://kubernetes.io/k"],'
+            '"suggestions":["What changed in v1.31?"]}'
+        ),
+        response(
+            '{"answer":"It is the node agent.","citations":["https://kubernetes.io/k"],'
+            '"suggestions":["What else does the node agent do?"]}'
+        ),
+    )
+
+    answer = claude.answer_documentation_question("What is the kubelet?", [chunk])
+
+    assert answer.suggestions == ["What else does the node agent do?"]

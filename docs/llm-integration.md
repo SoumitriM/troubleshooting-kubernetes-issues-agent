@@ -49,6 +49,13 @@ The composer can only rephrase:
   (`DIAGNOSTIC_COMMANDS` in `nodes.py`), so `journalctl -u kubelet` can be
   suggested but an invented command cannot.
 - Citations must be URLs from the payload.
+- Suggestions must be backed by evidence. The prompt allows only follow-ups
+  that name components, versions, issues, errors or doc topics present in the
+  payload, and no troubleshooting advice. In code, each suggestion goes
+  through the same number, issue and code check as the reply (also for
+  `answer_documentation_question` and `research_step`). Out-of-scope and
+  failed-query replies have no evidence, so their suggestions must be copied
+  from `EXAMPLE_QUESTIONS` in `nodes.py`.
 - If the call fails or is rejected twice, the template is used unchanged, so
   the reply loses tone but never content.
 
@@ -85,7 +92,7 @@ exactly as stored.
 | Method | The reply is rejected if |
 |---|---|
 | `generate_grounded_fix` | The summary is not one of the supplied resolution summaries, or any step or citation was not supplied |
-| `compose_reply` | The reply has a URL, or an issue number, number, version or code span absent from the payload, or a citation was not supplied |
+| `compose_reply` | The reply or a suggestion has a URL, or an issue number, number, version or code span absent from the payload; a citation was not supplied; or an out-of-scope suggestion is not one of the example questions |
 | `answer_documentation_question` | A citation is not the source URL of a retrieved chunk |
 | `extract_resolution` | An evidence URL does not appear in the issue's comments, PRs or commits |
 | `generate_cypher` | Parameter names repeat. The Cypher itself is then checked by `CypherValidator` |

@@ -42,6 +42,15 @@ DIAGNOSTIC_COMMANDS = [
     "kubectl version",
     "journalctl -u kubelet",
 ]
+# Questions known to be answerable from the graph and docs. Replies with no
+# retrieved evidence (out of scope, failed graph query) suggest only these.
+EXAMPLE_QUESTIONS = [
+    "What does the kubelet do?",
+    "Which components have the most reported issues?",
+    "How do Deployments perform rolling updates?",
+    "How many issues were reported per Kubernetes version?",
+    "What happens when a Pod fails a readiness probe?",
+]
 # Facts sent to the composer are trimmed so one reply stays a cheap call.
 COMPOSE_MAX_ROWS = 25
 COMPOSE_TEXT_CHARS = 600
@@ -396,7 +405,12 @@ class IncidentNodes:
                 "Please make the analytics question more specific."
             )
         composed = self._converse(
-            state, situation, {"question": state.get("normalized_query")}
+            state,
+            situation,
+            {
+                "question": state.get("normalized_query"),
+                "example_questions": EXAMPLE_QUESTIONS,
+            },
         )
         return {
             "answer": composed.reply if composed else answer,
@@ -955,7 +969,9 @@ class IncidentNodes:
         ):
             return empty
         if state.get("out_of_scope"):
-            composed = self._converse(state, "out_of_scope", {})
+            composed = self._converse(
+                state, "out_of_scope", {"example_questions": EXAMPLE_QUESTIONS}
+            )
             if composed is None:
                 return empty
             return {
