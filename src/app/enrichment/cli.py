@@ -4,10 +4,10 @@ import logging
 from pathlib import Path
 from typing import Any, Iterator
 
-from app.enrichment.fh_genie_client import (
+from app.enrichment.claude_client import (
     EnrichmentResponseError,
-    EnrichmentSettings,
-    FHGenieClient,
+    ClaudeClient,
+    ClaudeSettings,
 )
 
 
@@ -22,7 +22,7 @@ def positive_int(value: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Enrich issues with FH Genie")
+    parser = argparse.ArgumentParser(description="Enrich issues with Claude")
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--limit", type=positive_int)
@@ -82,7 +82,7 @@ def write_output(
 def enrich_jsonl(
     input_path: Path,
     output_path: Path,
-    client: FHGenieClient,
+    client: ClaudeClient,
     limit: int | None = None,
     overwrite: bool = False,
 ) -> tuple[int, int]:
@@ -144,8 +144,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     args = build_parser().parse_args()
-    settings = EnrichmentSettings()
-    client = FHGenieClient(settings)
+    client = ClaudeClient(ClaudeSettings())
     succeeded, failed = enrich_jsonl(
         args.input,
         args.output,

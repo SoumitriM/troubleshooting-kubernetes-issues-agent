@@ -12,7 +12,7 @@ from app.enrichment.models import IssueEnrichment
 from app.main import AgentResources, create_app
 
 
-class ConversationFHGenie:
+class ConversationLLM:
     def __init__(self) -> None:
         self.analysis_inputs: list[str] = []
 
@@ -75,13 +75,13 @@ class ConversationRetriever:
         }
 
 
-def conversation_app() -> tuple[Any, ConversationFHGenie, ConversationRetriever]:
-    fh_genie = ConversationFHGenie()
+def conversation_app() -> tuple[Any, ConversationLLM, ConversationRetriever]:
+    llm = ConversationLLM()
     retriever = ConversationRetriever()
     saver = InMemorySaver(serde=strict_checkpoint_serializer())
     workflow = build_workflow(
         IncidentNodes(
-            fh_genie,  # type: ignore[arg-type]
+            llm,  # type: ignore[arg-type]
             retriever,  # type: ignore[arg-type]
             AgentSettings(_env_file=None),
             enable_interrupts=True,
@@ -89,11 +89,11 @@ def conversation_app() -> tuple[Any, ConversationFHGenie, ConversationRetriever]
         checkpointer=saver,
     )
     app = create_app(lambda: AgentResources(workflow=workflow, driver=MagicMock()))
-    return app, fh_genie, retriever
+    return app, llm, retriever
 
 
 def test_pause_resume_merges_analysis_and_completes() -> None:
-    app, fh_genie, retriever = conversation_app()
+    app, llm, retriever = conversation_app()
     with TestClient(app) as client:
         paused = client.post(
             "/api/incidents/analyze",
@@ -115,8 +115,8 @@ def test_pause_resume_merges_analysis_and_completes() -> None:
     assert resumed.status_code == 200
     assert resumed.json()["status"] == "completed"
     assert resumed.json()["route"] == "generate_findings"
-    assert len(fh_genie.analysis_inputs) == 2
-    assert "Clarification 1:" in fh_genie.analysis_inputs[1]
+    assert len(llm.analysis_inputs) == 2
+    assert "Clarification 1:" in llm.analysis_inputs[1]
     assert retriever.calls
     analysis = retriever.calls[0][1]
     assert analysis.components == ["kubelet", "garbage collector"]
@@ -124,7 +124,7 @@ def test_pause_resume_merges_analysis_and_completes() -> None:
 
 
 def test_resume_rejects_unknown_thread() -> None:
-    app, _fh_genie, _retriever = conversation_app()
+    app, _llm, _retriever = conversation_app()
     with TestClient(app) as client:
         response = client.post(
             "/api/incidents/missing-thread/resume",
@@ -134,7 +134,7 @@ def test_resume_rejects_unknown_thread() -> None:
 
 
 def test_maximum_three_clarification_attempts_returns_safe_completion() -> None:
-    app, _fh_genie, retriever = conversation_app()
+    app, _llm, retriever = conversation_app()
     with TestClient(app) as client:
         response = client.post(
             "/api/incidents/analyze",
@@ -157,7 +157,7 @@ def test_maximum_three_clarification_attempts_returns_safe_completion() -> None:
 
 
 def test_thread_and_resume_payload_validation() -> None:
-    app, _fh_genie, _retriever = conversation_app()
+    app, _llm, _retriever = conversation_app()
     with TestClient(app) as client:
         invalid_thread = client.post(
             "/api/incidents/analyze",

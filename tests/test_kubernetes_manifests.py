@@ -41,7 +41,7 @@ def test_secret_template_contains_only_explicit_placeholders() -> None:
     secret = manifest("02-secret.example.yaml")
     kustomization = manifest("kustomization.yaml")
 
-    assert "replace-with-fh-genie-key" in secret
+    assert "replace-with-anthropic-api-key" in secret
     assert "replace-with-neo4j-username" in secret
     assert "replace-with-neo4j-password" in secret
     assert "02-secret.example.yaml" not in kustomization

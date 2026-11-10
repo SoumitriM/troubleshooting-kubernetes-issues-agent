@@ -31,11 +31,11 @@ spec:
             - configMapRef:
                 name: incident-ai-config
           env:
-            - name: FH_GENIE_KEY
+            - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: incident-ai-secrets
-                  key: FH_GENIE_KEY
+                  key: ANTHROPIC_API_KEY
             - name: NEO4J_USERNAME
               valueFrom:
                 secretKeyRef:

@@ -6,8 +6,8 @@ metadata:
 data:
   APP_ENV: production
   NEO4J_URI: neo4j://neo4j:7687
-  FH_GENIE_BASE_URL: https://replace-with-fh-genie-base-url.example
-  FH_GENIE_MODEL: replace-with-fh-genie-model
+  LLM_MODEL: claude-opus-5-5
+  LLM_EFFORT: low
   AGENT_RELEVANCE_THRESHOLD: "0.55"
   AGENT_ACTIONABLE_FIX_THRESHOLD: "0.65"
   DOCUMENTATION_INDEX_PATH: /app/data/kubernetes_docs.sqlite

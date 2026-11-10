@@ -19,7 +19,7 @@ def understand(query: str, **updates):
         normalized_query=query,
         intent=updates.pop("intent"),
         intent_confidence=0.97,
-        reasoning="Semantic interpretation supplied by FH Genie",
+        reasoning="Semantic interpretation supplied by Claude",
         **updates,
     )
     model = SemanticModel(analysis)
@@ -108,7 +108,7 @@ def test_conceptual_query_routes_to_documentation() -> None:
 def test_model_outage_fails_closed_without_regex_nlp() -> None:
     class Unavailable:
         def analyze_query(self, query):
-            raise ConnectionError("FH Genie unavailable")
+            raise ConnectionError("Claude unavailable")
 
     result = IncidentNodes(  # type: ignore[arg-type]
         Unavailable(), None, AgentSettings(_env_file=None)
@@ -117,3 +117,78 @@ def test_model_outage_fails_closed_without_regex_nlp() -> None:
     assert result["intent"] == "NEEDS_CLARIFICATION"
     assert result["intent_confidence"] == 0.0
     assert "temporarily unavailable" in result["intent_reasoning"]
+
+
+def test_lost_technical_token_keeps_semantics_but_uses_original_text() -> None:
+    class RewritingModel:
+        def analyze_query(self, query):
+            return QueryUnderstanding(
+                normalized_query="Kubelet crashes after upgrading Kubernetes",
+                intent="INCIDENT_TROUBLESHOOTING",
+                intent_confidence=0.95,
+                components=["kubelet"],
+                versions=["v1.35"],
+                has_concrete_incident=True,
+                reasoning="Concrete kubelet crash",
+            )
+
+    query = "My kubelet started crashing after upgrading to v1.35"
+    result = IncidentNodes(  # type: ignore[arg-type]
+        RewritingModel(), None, AgentSettings(_env_file=None)
+    ).understand_query({"user_query": query})
+
+    assert result["intent"] == "INCIDENT_TROUBLESHOOTING"
+    assert result["normalized_query"] == query
+    assert result["kubernetes_version"] == "v1.35"
+
+
+def test_model_outage_ends_with_unavailable_answer_instead_of_interrupt() -> None:
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from app.agent.workflow import build_workflow
+
+    class Unavailable:
+        def analyze_query(self, query):
+            raise ConnectionError("Claude unavailable")
+
+    workflow = build_workflow(
+        IncidentNodes(  # type: ignore[arg-type]
+            Unavailable(), None, AgentSettings(_env_file=None), enable_interrupts=True
+        ),
+        checkpointer=InMemorySaver(),
+    )
+    result = workflow.invoke(
+        {"user_query": "What does the kubelet do?"},
+        {"configurable": {"thread_id": "outage"}},
+    )
+
+    assert "__interrupt__" not in result
+    assert "temporarily unavailable" in result["answer"]
+    assert "Please provide" not in result["answer"]
+    assert result["intent"] == "NEEDS_CLARIFICATION"
+
+
+def test_out_of_scope_query_gets_scope_answer_without_clarification() -> None:
+    from app.agent.nodes import AgentSettings, IncidentNodes
+    from app.agent.state import QueryUnderstanding
+    from app.agent.workflow import build_workflow
+
+    class OffTopicLLM:
+        def analyze_query(self, query: str) -> QueryUnderstanding:
+            return QueryUnderstanding(
+                normalized_query=query,
+                intent="NEEDS_CLARIFICATION",
+                intent_confidence=0.9,
+                in_scope=False,
+                reasoning="Not a Kubernetes question",
+            )
+
+    workflow = build_workflow(
+        IncidentNodes(OffTopicLLM(), None, AgentSettings(_env_file=None))  # type: ignore[arg-type]
+    )
+
+    result = workflow.invoke({"user_query": "What is the capital of France?"})
+
+    assert result["route"] == "request_clarification"
+    assert result["answer"].startswith("I can only help with Kubernetes")
+    assert "Please provide" not in result["answer"]

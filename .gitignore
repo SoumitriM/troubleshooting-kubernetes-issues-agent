@@ -29,9 +29,13 @@ env/
 data/raw/*.jsonl
 data/processed/*.jsonl
 data/checkpoints.sqlite
+data/conversations.sqlite
 data/checkpoints.sqlite-shm
 data/checkpoints.sqlite-wal
 data/checkpoints.sqlite-journal
 data/kubernetes_docs.sqlite
 data/kubernetes_docs.sqlite-*
 data/kubernetes-website/
+
+# Golden evaluation run output
+evals/results/

@@ -4,10 +4,10 @@ import logging
 from pathlib import Path
 from typing import Any, Iterator
 
-from app.enrichment.fh_genie_client import (
+from app.enrichment.claude_client import (
     EnrichmentResponseError,
-    EnrichmentSettings,
-    FHGenieClient,
+    ClaudeClient,
+    ClaudeSettings,
 )
 from app.enrichment.resolution_models import IssueResolution
 
@@ -24,7 +24,7 @@ def positive_int(value: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Extract grounded issue resolutions with FH Genie"
+        description="Extract grounded issue resolutions with Claude"
     )
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
@@ -88,7 +88,7 @@ def write_output(path: Path, records: dict[str, dict[str, Any]]) -> None:
 def extract_resolutions(
     input_path: Path,
     output_path: Path,
-    client: FHGenieClient,
+    client: ClaudeClient,
     limit: int | None = None,
     overwrite: bool = False,
 ) -> tuple[int, int]:
@@ -142,7 +142,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     args = build_parser().parse_args()
-    client = FHGenieClient(EnrichmentSettings())
+    client = ClaudeClient(ClaudeSettings())
     succeeded, failed = extract_resolutions(
         args.input,
         args.output,

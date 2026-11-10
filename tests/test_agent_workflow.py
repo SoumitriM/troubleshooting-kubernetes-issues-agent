@@ -6,7 +6,7 @@ from app.agent.workflow import build_workflow
 from app.enrichment.models import IssueEnrichment
 
 
-class FakeFHGenie:
+class FakeLLM:
     def __init__(self) -> None:
         self.fix_calls = 0
 
@@ -155,22 +155,22 @@ def matched_issue(
 def run_workflow(
     context: dict[str, Any],
     query: str = "Non-admin users can enable DRA adminAccess",
-) -> tuple[dict[str, Any], FakeFHGenie, FakeRetriever]:
-    fh_genie = FakeFHGenie()
+) -> tuple[dict[str, Any], FakeLLM, FakeRetriever]:
+    llm = FakeLLM()
     retriever = FakeRetriever(context)
     nodes = IncidentNodes(
-        fh_genie,  # type: ignore[arg-type]
+        llm,  # type: ignore[arg-type]
         retriever,  # type: ignore[arg-type]
         AgentSettings(_env_file=None),
     )
     result = build_workflow(nodes).invoke({"user_query": query})
-    return result, fh_genie, retriever
+    return result, llm, retriever
 
 
 def test_generate_fix_route_uses_only_verified_actionable_evidence() -> None:
     context = {"matched_issues": [matched_issue(0.91, actionable=True)], "related_issues": []}
 
-    result, fh_genie, retriever = run_workflow(context)
+    result, llm, retriever = run_workflow(context)
 
     assert result["route"] == "generate_fix"
     assert result["actionable_fix_available"] is True
@@ -178,7 +178,7 @@ def test_generate_fix_route_uses_only_verified_actionable_evidence() -> None:
     assert result["citations"] == [
         "https://github.com/kubernetes/kubernetes/pull/1"
     ]
-    assert fh_genie.fix_calls == 1
+    assert llm.fix_calls == 1
     assert retriever.calls == 1
 
 
@@ -203,7 +203,7 @@ def test_generate_findings_route_never_offers_closed_without_fix() -> None:
         ],
     }
 
-    result, fh_genie, retriever = run_workflow(context)
+    result, llm, retriever = run_workflow(context)
 
     assert result["route"] == "generate_findings"
     assert result["actionable_fix_available"] is False
@@ -214,7 +214,7 @@ def test_generate_findings_route_never_offers_closed_without_fix() -> None:
         "answer"
     ]
     assert "#141293" in result["answer"] and "components: DRA" in result["answer"]
-    assert fh_genie.fix_calls == 0
+    assert llm.fix_calls == 0
     assert retriever.calls == 1
 
 
@@ -224,7 +224,7 @@ def test_findings_do_not_cite_unused_resolution_evidence() -> None:
         "https://github.com/kubernetes/kubernetes/issues/1#issuecomment-unused"
     ]
 
-    result, _fh_genie, _retriever = run_workflow(
+    result, _llm, _retriever = run_workflow(
         {"matched_issues": [issue], "related_issues": []}
     )
 
@@ -235,7 +235,7 @@ def test_findings_do_not_cite_unused_resolution_evidence() -> None:
 
 
 def test_no_close_match_requests_logs_and_reports_no_historical_match() -> None:
-    result, _fh_genie, retriever = run_workflow(
+    result, _llm, retriever = run_workflow(
         {"matched_issues": [], "related_issues": [], "no_close_match": True}
     )
 
@@ -254,7 +254,7 @@ def test_cross_version_context_is_not_offered_as_a_solution() -> None:
         "version_match_type": "conflict",
         "conflicting_versions": ["v1.29.15"],
     }
-    result, fh_genie, _retriever = run_workflow(
+    result, llm, _retriever = run_workflow(
         {
             "matched_issues": [],
             "cross_version_matches": [cross_version],
@@ -267,20 +267,20 @@ def test_cross_version_context_is_not_offered_as_a_solution() -> None:
     assert "similar symptom exists in another Kubernetes version" in result["answer"]
     assert "must not be assumed to apply" in result["answer"]
     assert result["citations"] == []
-    assert fh_genie.fix_calls == 0
+    assert llm.fix_calls == 0
 
 
 def test_request_clarification_route_for_low_similarity() -> None:
     context = {"matched_issues": [matched_issue(0.2, actionable=True)], "related_issues": []}
 
-    result, fh_genie, retriever = run_workflow(context)
+    result, llm, retriever = run_workflow(context)
 
     assert result["route"] == "request_clarification"
     assert result["actionable_fix_available"] is False
     assert "logs" in result["answer"]
     assert "error message" in result["answer"]
     assert result["citations"] == []
-    assert fh_genie.fix_calls == 0
+    assert llm.fix_calls == 0
     assert retriever.calls == 1
 
 
@@ -291,7 +291,7 @@ def test_similarity_thresholds_are_configurable() -> None:
         agent_actionable_fix_threshold=0.95,
     )
     nodes = IncidentNodes(
-        FakeFHGenie(),  # type: ignore[arg-type]
+        FakeLLM(),  # type: ignore[arg-type]
         FakeRetriever({}),  # type: ignore[arg-type]
         settings,
     )
@@ -307,7 +307,7 @@ def test_similarity_thresholds_are_configurable() -> None:
 
 
 def test_kubernetes_not_working_requests_clarification_without_retrieval() -> None:
-    result, fh_genie, retriever = run_workflow(
+    result, llm, retriever = run_workflow(
         {"matched_issues": [matched_issue(0.99, actionable=True)]},
         query="Kubernetes is not working",
     )
@@ -316,11 +316,11 @@ def test_kubernetes_not_working_requests_clarification_without_retrieval() -> No
     assert result["has_sufficient_details"] is False
     assert "specific observed behaviour" in result["answer"]
     assert retriever.calls == 0
-    assert fh_genie.fix_calls == 0
+    assert llm.fix_calls == 0
 
 
 def test_generic_objects_behave_incorrectly_requests_clarification() -> None:
-    result, _fh_genie, retriever = run_workflow(
+    result, _llm, retriever = run_workflow(
         {"matched_issues": [matched_issue(0.99, actionable=True)]},
         query="Some Kubernetes objects behave incorrectly",
     )
@@ -332,7 +332,7 @@ def test_generic_objects_behave_incorrectly_requests_clarification() -> None:
 
 
 def test_cluster_not_working_requests_clarification_without_retrieval() -> None:
-    result, _fh_genie, retriever = run_workflow(
+    result, _llm, retriever = run_workflow(
         {"matched_issues": [matched_issue(0.99, actionable=True)]},
         query="My Kubernetes cluster is not working",
     )
@@ -343,7 +343,7 @@ def test_cluster_not_working_requests_clarification_without_retrieval() -> None:
 
 
 def test_garbage_collector_version_query_calls_retrieval() -> None:
-    result, _fh_genie, retriever = run_workflow(
+    result, _llm, retriever = run_workflow(
         {"matched_issues": [], "related_issues": [], "no_close_match": True},
         query=(
             "The garbage collector repeatedly processes objects with valid owners "
@@ -359,7 +359,7 @@ def test_garbage_collector_version_query_calls_retrieval() -> None:
 
 
 def test_something_is_broken_requests_clarification_without_retrieval() -> None:
-    result, _fh_genie, retriever = run_workflow(
+    result, _llm, retriever = run_workflow(
         {"matched_issues": [matched_issue(0.99, actionable=True)]},
         query="Something is broken",
     )
@@ -369,7 +369,7 @@ def test_something_is_broken_requests_clarification_without_retrieval() -> None:
 
 
 def test_generic_error_statement_is_not_treated_as_an_error_code() -> None:
-    result, _fh_genie, retriever = run_workflow(
+    result, _llm, retriever = run_workflow(
         {"matched_issues": [matched_issue(0.99, actionable=True)]},
         query="There is an error",
     )
@@ -385,7 +385,7 @@ def test_specific_crashloop_query_calls_retrieval() -> None:
         "related_issues": [],
         "no_close_match": True,
     }
-    result, _fh_genie, retriever = run_workflow(
+    result, _llm, retriever = run_workflow(
         context,
         query="Pods enter CrashLoopBackOff after kubelet restart on Kubernetes v1.35",
     )
@@ -428,19 +428,19 @@ def test_specific_query_with_high_score_but_weak_semantics_requests_clarificatio
             "kubernetes_versions": ["v1.34"],
         }
     )
-    result, fh_genie, retriever = run_workflow(
+    result, llm, retriever = run_workflow(
         {"matched_issues": [unrelated], "related_issues": []}
     )
 
     assert result["route"] == "request_clarification"
     assert result["top_similarity_score"] == 0.92
     assert retriever.calls == 1
-    assert fh_genie.fix_calls == 0
+    assert llm.fix_calls == 0
 
 
 def test_shared_component_does_not_override_incompatible_symptom() -> None:
     nodes = IncidentNodes(  # type: ignore[arg-type]
-        FakeFHGenie(), None, AgentSettings(_env_file=None)
+        FakeLLM(), None, AgentSettings(_env_file=None)
     )
     understanding = QueryUnderstanding(
         normalized_query="Pod enters CrashLoopBackOff after kubelet restart",
@@ -462,3 +462,110 @@ def test_shared_component_does_not_override_incompatible_symptom() -> None:
             "error_messages": ["exitCode 0"],
         }],
     ) is False
+
+
+def test_retriever_accepted_match_counts_as_evidence_overlap() -> None:
+    nodes = IncidentNodes(  # type: ignore[arg-type]
+        FakeLLM(), None, AgentSettings(_env_file=None)
+    )
+    understanding = QueryUnderstanding(
+        normalized_query="Pods restart repeatedly after kubelet upgrade",
+        intent="INCIDENT_TROUBLESHOOTING",
+        intent_confidence=0.99,
+        components=["kubelet"],
+        symptoms=["Pods restart repeatedly"],
+        observed_behavior="Pods restart repeatedly after the kubelet upgrade",
+        has_concrete_incident=True,
+        reasoning="Concrete pod restart",
+    )
+
+    # Real Neo4j matches carry the retriever's reranking verdict, and the wording
+    # of a stored symptom rarely contains the user's phrasing verbatim.
+    assert nodes._has_evidence_overlap(
+        {"query_understanding": understanding},
+        [{
+            "components": ["kubelet"],
+            "symptom": "Containers are restarted after kubelet is upgraded",
+            "error_messages": [],
+            "relevance": {"accepted": True},
+        }],
+    ) is True
+
+
+def _verification_nodes(labels: dict[int, str]):
+    from app.agent.nodes import AgentSettings, IncidentNodes
+
+    class VerifyingLLM:
+        def verify_incident_matches(self, report, candidates):
+            return labels
+
+    return IncidentNodes(VerifyingLLM(), None, AgentSettings(_env_file=None))  # type: ignore[arg-type]
+
+
+def _context() -> dict[str, Any]:
+    return {
+        "matched_issues": [
+            {"issue_number": 1, "title": "a", "score": 0.9},
+            {"issue_number": 2, "title": "b", "score": 0.8},
+        ],
+        "related_issues": [{"issue_number": 3, "title": "c"}],
+    }
+
+
+def test_verification_drops_unrelated_and_demotes_related_matches() -> None:
+    nodes = _verification_nodes({1: "same_failure", 2: "related", 3: "unrelated"})
+
+    context = nodes._verify_matches({"user_query": "q"}, _context())
+
+    assert [i["issue_number"] for i in context["matched_issues"]] == [1]
+    assert [i["issue_number"] for i in context["related_issues"]] == [2]
+
+
+def test_verification_keeps_related_matches_when_none_is_the_same_failure() -> None:
+    nodes = _verification_nodes({1: "related", 2: "unrelated", 3: "unrelated"})
+
+    context = nodes._verify_matches({"user_query": "q"}, _context())
+
+    assert [i["issue_number"] for i in context["matched_issues"]] == [1]
+    assert context["related_issues"] == []
+    assert not context.get("no_close_match")
+
+
+def test_verification_with_only_unrelated_matches_reports_no_close_match() -> None:
+    nodes = _verification_nodes({1: "unrelated", 2: "unrelated", 3: "unrelated"})
+
+    context = nodes._verify_matches({"user_query": "q"}, _context())
+
+    assert context["matched_issues"] == []
+    assert context["no_close_match"] is True
+
+
+def test_unreachable_incident_graph_reports_outage_without_clarification() -> None:
+    from app.agent.nodes import AgentSettings, IncidentNodes
+    from app.agent.state import QueryUnderstanding
+    from app.agent.workflow import build_workflow
+
+    class IncidentLLM:
+        def analyze_query(self, query: str) -> QueryUnderstanding:
+            return QueryUnderstanding(
+                normalized_query=query,
+                intent="INCIDENT_TROUBLESHOOTING",
+                intent_confidence=0.9,
+                components=["kubelet"],
+                symptoms=["kubelet crashes"],
+                has_concrete_incident=True,
+                reasoning="Concrete incident",
+            )
+
+    class DownRetriever:
+        def search(self, **_kwargs):
+            raise ConnectionError("Neo4j unavailable")
+
+    workflow = build_workflow(
+        IncidentNodes(IncidentLLM(), DownRetriever(), AgentSettings(_env_file=None))  # type: ignore[arg-type]
+    )
+
+    result = workflow.invoke({"user_query": "kubelet crashes on start"})
+
+    assert "temporarily unavailable" in result["answer"]
+    assert "Please provide" not in result["answer"]

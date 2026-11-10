@@ -15,14 +15,20 @@ from app.agent.state import (
     QueryUnderstanding,
     Route,
 )
-from app.enrichment.fh_genie_client import FHGenieClient
+from app.enrichment.claude_client import ClaudeClient
 from app.documentation.store import KubernetesDocsRetriever
 from app.graph.analytics import GraphAnalyticsRepository
 from app.graph.cypher_validation import CypherValidator
+from app.graph.formatting import format_graph_answer, query_limit
 from app.retrieval.graph_retriever import GraphRetriever
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+# Component names are stored as reported; the query understanding may name the
+# same component with or without its "kube-" binary prefix.
+COMPONENT_KEY = "replace(toLower(c.name), 'kube-', '')"
 
 
 class AgentSettings(BaseSettings):
@@ -40,7 +46,7 @@ class IncidentNodes:
 
     def __init__(
         self,
-        fh_genie: FHGenieClient,
+        llm: ClaudeClient,
         retriever: GraphRetriever,
         settings: AgentSettings,
         *,
@@ -49,7 +55,7 @@ class IncidentNodes:
         cypher_validator: CypherValidator | None = None,
         enable_interrupts: bool = False,
     ) -> None:
-        self._fh_genie = fh_genie
+        self._llm = llm
         self._retriever = retriever
         self._settings = settings
         self._analytics_repository = analytics_repository
@@ -67,12 +73,22 @@ class IncidentNodes:
                 for index, answer in enumerate(history, 1)
             ]
         )
+        understanding_unavailable = False
         try:
-            analysis = self._fh_genie.analyze_query(query)
+            history = state.get("conversation_history") or []
+            analysis = (
+                self._llm.analyze_query(query, history=history)
+                if history
+                else self._llm.analyze_query(query)
+            )
             if not self._preserves_technical_tokens(query, analysis.normalized_query):
-                raise ValueError("normalized query lost an immutable technical token")
+                # The structured interpretation is still usable; only the rewritten
+                # text is untrusted, so retrieval falls back to the user's wording.
+                LOGGER.warning("Normalized query lost a technical token; using original")
+                analysis = analysis.model_copy(update={"normalized_query": query.strip()})
         except Exception:
-            LOGGER.exception("FH Genie query understanding unavailable")
+            LOGGER.exception("Claude query understanding unavailable")
+            understanding_unavailable = True
             analysis = QueryUnderstanding(
                 normalized_query=query.strip(),
                 intent="NEEDS_CLARIFICATION",
@@ -101,6 +117,8 @@ class IncidentNodes:
             "normalized_query": analysis.normalized_query,
             "normalized_symptoms": analysis.symptoms,
             "query_understanding": analysis,
+            "query_understanding_unavailable": understanding_unavailable,
+            "out_of_scope": not analysis.in_scope,
             "intent": analysis.intent,
             "intent_confidence": analysis.intent_confidence,
             "intent_reasoning": analysis.reasoning,
@@ -119,25 +137,38 @@ class IncidentNodes:
         attempt = state.get("cypher_attempt_count", 0) + 1
         try:
             normalized = self._normalization_from_state(state)
-            generated = self._analytics_cypher(state["query_understanding"])
+            alternative = bool(state.get("alternative_attempted"))
+            generated = (
+                None if alternative else self._analytics_cypher(state["query_understanding"])
+            )
             source = "deterministic"
             if generated is None:
                 source = "model"
-                generated = self._fh_genie.generate_cypher(
+                hints = state.get("alternative_hints") or []
+                generated = self._llm.generate_cypher(
                     normalized,
                     intent=state["intent"],
                     validation_errors=state.get("cypher_validation_errors", []),
+                    **({"hints": hints} if hints else {}),
                 )
             LOGGER.info(
                 "Generated Cypher attempt=%d source=%s",
                 attempt,
                 source,
             )
+            deterministic = source == "deterministic"
             return {
                 "generated_cypher": generated.cypher,
                 "cypher_parameters": generated.parameters,
                 "cypher_explanation": generated.explanation,
                 "cypher_attempt_count": attempt,
+                "graph_display_limit": (
+                    self._display_limit(state["query_understanding"])
+                    if deterministic
+                    else query_limit(generated.cypher)
+                ),
+                "graph_limit_probed": deterministic,
+                "cypher_source": source,
             }
         except Exception:
             LOGGER.warning("Cypher generation failed attempt=%d", attempt)
@@ -189,23 +220,84 @@ class IncidentNodes:
                 "route": "answer_from_graph",
             }
 
+    def prepare_alternative(self, state: IncidentState) -> dict[str, Any]:
+        """Collect graph names close to the question's terms for one broader query.
+
+        A template found no rows, usually because the question names a
+        component or version differently from the graph ("DRA admin access"
+        vs "draadminaccess"). The hints are real graph values, so Claude's
+        alternative query is grounded in what exists.
+        """
+
+        understanding = state["query_understanding"]
+        tokens = sorted({
+            token
+            for value in [*understanding.components, *understanding.entities]
+            for token in re.findall(r"[a-z0-9]+", value.lower())
+            if len(token) > 2 and token not in {"kube", "kubernetes", "issue", "issues"}
+        })
+        hints: list[str] = []
+        if tokens and self._analytics_repository is not None:
+            try:
+                rows = self._analytics_repository.execute_read(
+                    "MATCH (c:Component) WHERE any(token IN $tokens WHERE "
+                    "replace(replace(toLower(c.name), '-', ''), ' ', '') CONTAINS token) "
+                    "RETURN c.name AS name ORDER BY size(c.name) LIMIT 15",
+                    {"tokens": tokens},
+                )
+                names = [row["name"] for row in rows]
+                if names:
+                    hints.append("Component names in the graph similar to the question: " + ", ".join(names))
+            except Exception:
+                LOGGER.warning("Could not collect alternative query hints")
+        if understanding.versions:
+            hints.append(
+                "Versions are stored as reported, e.g. 1.36, v1.36.2, v1.36.x; "
+                "match the minor version with a regular expression."
+            )
+        hints.append("Original structured query (returned no rows): " + state.get("generated_cypher", ""))
+        LOGGER.info("Trying a broader alternative query hints=%d", len(hints))
+        return {
+            "alternative_attempted": True,
+            "alternative_hints": hints,
+            "cypher_attempt_count": 0,
+            "cypher_validation_errors": [],
+        }
+
     def answer_from_graph(self, state: IncidentState) -> dict[str, Any]:
         if state.get("answer"):
             return {}
         rows = state.get("graph_results", [])
-        answerer = getattr(self._fh_genie, "answer_graph_question", None)
-        answer = (
-            answerer(state["normalized_query"], rows)
-            if answerer is not None
-            else self._format_graph_results(rows)
-        )
+        answerer = getattr(self._llm, "answer_graph_question", None)
+        if answerer is not None:
+            answer, citations = answerer(state["normalized_query"], rows), []
+        else:
+            answer, citations = format_graph_answer(
+                rows,
+                display_limit=state.get("graph_display_limit"),
+                probed=bool(state.get("graph_limit_probed")),
+            )
+            if state.get("alternative_attempted"):
+                answer = (
+                    "No reported issues matched the exact names in your question"
+                    + (", or a broader search." if not rows else ". A broader search found:\n")
+                    + (answer if rows else "")
+                )
         return {
             "answer": answer,
-            "citations": [],
+            "citations": citations,
             "route": "answer_from_graph",
         }
 
     def graph_query_failed(self, state: IncidentState) -> dict[str, Any]:
+        if state.get("alternative_attempted"):
+            # The structured query already ran and found nothing; only the
+            # broader alternative failed validation.
+            return {
+                "answer": "The knowledge graph returned no matching results.",
+                "citations": [],
+                "route": "answer_from_graph",
+            }
         return {
             "answer": (
                 "I could not produce a safe graph query after two attempts. "
@@ -215,12 +307,122 @@ class IncidentNodes:
             "route": "answer_from_graph",
         }
 
+    MAX_RESEARCH_TOOL_CALLS = 4
+
+    def research(self, state: IncidentState) -> dict[str, Any]:
+        """Answer a multi-source question with a bounded, read-only tool loop.
+
+        Claude chooses each tool call and when to stop. Tools reuse the same
+        retrieval, template analytics and documentation search as the single
+        routes, and the final answer may cite only URLs the tools returned.
+        Any failure falls back to the question's primary route.
+        """
+
+        stepper = getattr(self._llm, "research_step", None)
+        if stepper is None:
+            return {"research_failed": True}
+        question = state["normalized_query"]
+        observations: list[dict[str, Any]] = []
+        allowed_urls: set[str] = set()
+        steps: list[dict[str, Any]] = []
+        try:
+            for _ in range(self.MAX_RESEARCH_TOOL_CALLS + 1):
+                remaining = self.MAX_RESEARCH_TOOL_CALLS - len(observations)
+                step = stepper(
+                    question,
+                    observations,
+                    remaining_tool_calls=remaining,
+                    allowed_urls=allowed_urls,
+                )
+                steps.append(step.model_dump(include={"action", "reason", "query", "operation", "components"}))
+                if step.action == "final_answer":
+                    LOGGER.info("Research answered after tool_calls=%d", len(observations))
+                    return {
+                        "answer": step.answer,
+                        "citations": list(dict.fromkeys(step.citations)),
+                        "route": "research_answer",
+                        "research_steps": steps,
+                    }
+                result, urls = self._research_tool(state, step)
+                allowed_urls.update(urls)
+                observations.append({"tool": step.action, "input": steps[-1], "result": result})
+        except Exception:
+            LOGGER.exception("Research loop failed; using the primary route")
+        return {"research_failed": True, "research_steps": steps}
+
+    def _research_tool(self, state: IncidentState, step: Any) -> tuple[Any, set[str]]:
+        understanding = state["query_understanding"]
+        if step.action == "search_docs":
+            if self._documentation_retriever is None:
+                return "Documentation search is unavailable.", set()
+            chunks = self._documentation_retriever.search(step.query, limit=4)
+            return (
+                [{"url": c["source_url"], "section": c["section"], "text": c["text"][:1500]} for c in chunks],
+                {c["source_url"] for c in chunks},
+            )
+        if step.action == "search_incidents":
+            analysis = QueryAnalysis(
+                symptom=step.query,
+                components=step.components or understanding.components,
+                kubernetes_version=next(iter(step.versions or understanding.versions), None),
+                error_messages=understanding.error_messages,
+                has_sufficient_details=True,
+            )
+            context = self._retriever.search(
+                query_text=step.query, query_analysis=analysis, limit=3, debug=False
+            )
+            issues = []
+            urls: set[str] = set()
+            for issue in context.get("matched_issues", [])[:3]:
+                record = {
+                    "issue_number": issue.get("issue_number"),
+                    "title": issue.get("title"),
+                    "summary": issue.get("summary"),
+                    "url": issue.get("url"),
+                }
+                # Same rules as generate_fix: only verified, actionable resolutions.
+                fix = next(iter(self._actionable_fixes({"matched_issues": [issue]})), None)
+                if fix:
+                    record["verified_fix"] = {
+                        "summary": fix.get("resolution_summary"),
+                        "steps": fix.get("verified_steps", []),
+                        "evidence_urls": fix.get("evidence_urls", []),
+                    }
+                    urls.update(fix.get("evidence_urls", []))
+                urls.update(self._finding_urls(issue))
+                issues.append(record)
+            return (issues or "No close historical incident was found."), urls
+        if step.action == "graph_analytics":
+            if self._analytics_repository is None:
+                return "Graph analytics is unavailable.", set()
+            request = QueryUnderstanding(
+                normalized_query=state["normalized_query"],
+                intent="GRAPH_ANALYTICS",
+                intent_confidence=1.0,
+                components=step.components,
+                versions=step.versions,
+                analytics_operation=step.operation,
+                group_by=step.group_by,
+                reasoning="research tool call",
+            )
+            generated = self._analytics_cypher(request)
+            if generated is None:
+                return "No analytics template fits that operation; try another grouping.", set()
+            if not self._cypher_validator.validate(generated.cypher, generated.parameters).valid:
+                return "The analytics query failed validation.", set()
+            rows = self._analytics_repository.execute_read(generated.cypher, generated.parameters)
+            answer, citations = format_graph_answer(
+                rows, display_limit=self._display_limit(request), probed=True
+            )
+            return answer, set(citations)
+        return "Unknown tool.", set()
+
     def retrieve_kubernetes_docs(self, state: IncidentState) -> dict[str, Any]:
         if self._documentation_retriever is None:
             return {"documentation_results": []}
         try:
             results = self._documentation_retriever.search(
-                state["normalized_query"], limit=5
+                state["normalized_query"], limit=6
             )
             LOGGER.info("Documentation retrieval returned chunks=%d", len(results))
             return {"documentation_results": results}
@@ -241,7 +443,7 @@ class IncidentNodes:
             }
         allowed_urls = {chunk["source_url"] for chunk in chunks}
         try:
-            generated = self._fh_genie.answer_documentation_question(
+            generated = self._llm.answer_documentation_question(
                 state["normalized_query"], chunks
             )
             if not set(generated.citations).issubset(allowed_urls):
@@ -297,12 +499,23 @@ class IncidentNodes:
 
     def retrieve_evidence(self, state: IncidentState) -> dict[str, Any]:
         analysis = state["query_analysis"]
-        context = self._retriever.search(
-            query_text=state["user_query"],
-            query_analysis=analysis,
-            limit=5,
-            debug=bool(state.get("debug")),
-        )
+        try:
+            context = self._retriever.search(
+                query_text=state["user_query"],
+                query_analysis=analysis,
+                limit=5,
+                debug=bool(state.get("debug")),
+            )
+        except Exception:
+            # Asking the user for details cannot help while the incident graph
+            # is unreachable; request_clarification reports the outage instead.
+            LOGGER.exception("Incident evidence retrieval failed")
+            return {
+                "retrieved_context": {},
+                "top_similarity_score": None,
+                "evidence_unavailable": True,
+            }
+        context = self._verify_matches(state, context)
         scores = [
             float(issue["score"])
             for issue in context.get("matched_issues", [])
@@ -312,6 +525,67 @@ class IncidentNodes:
             "retrieved_context": context,
             "top_similarity_score": max(scores) if scores else None,
         }
+
+    def _verify_matches(
+        self, state: IncidentState, context: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Let the model drop or demote candidates that only look similar.
+
+        Deterministic reranking cannot tell "same component, different failure"
+        from a real match. Verification can only narrow the retrieved set, and
+        any failure keeps the deterministic result.
+        """
+
+        verifier = getattr(self._llm, "verify_incident_matches", None)
+        matched = context.get("matched_issues", [])
+        related = context.get("related_issues", [])
+        if verifier is None or not (matched or related):
+            return context
+        candidates = [
+            {
+                "issue_number": issue["issue_number"],
+                "title": issue.get("title"),
+                "summary": issue.get("summary"),
+                "symptom": issue.get("symptom"),
+                "components": (issue.get("components") or issue.get("shared_components") or [])[:8],
+            }
+            for issue in [*matched, *related]
+        ]
+        report = state.get("original_query") or state["user_query"]
+        history = state.get("clarification_history") or []
+        if history:
+            report = "\n".join([report, *history])
+        try:
+            labels = verifier(report, candidates)
+        except Exception:
+            LOGGER.warning("Incident match verification unavailable; keeping reranked matches")
+            return context
+        verified = [i for i in matched if labels.get(i["issue_number"]) == "same_failure"]
+        demoted = [i for i in matched if labels.get(i["issue_number"]) == "related"]
+        if not verified:
+            # Labels vary between runs for borderline wording. Without a
+            # same-failure match, keep the rule-accepted "related" matches as
+            # direct ones rather than discarding the only evidence; only
+            # "unrelated" candidates are removed outright.
+            verified, demoted = demoted, []
+        kept_related = [
+            i for i in related if labels.get(i["issue_number"]) in {"same_failure", "related"}
+        ]
+        LOGGER.warning(
+            "Match verification kept=%d demoted=%d dropped=%d",
+            len(verified),
+            len(demoted),
+            len(matched) + len(related) - len(verified) - len(demoted) - len(kept_related),
+        )
+        updated = {
+            **context,
+            "matched_issues": verified,
+            "related_issues": [*demoted, *kept_related][:3] if verified else [],
+            "match_verification": labels,
+        }
+        if not verified:
+            updated["no_close_match"] = True
+        return updated
 
     def assess_evidence(self, state: IncidentState) -> dict[str, Any]:
         context = state.get("retrieved_context", {})
@@ -358,7 +632,7 @@ class IncidentNodes:
     def generate_fix(self, state: IncidentState) -> dict[str, Any]:
         fixes = self._actionable_fixes(state.get("retrieved_context", {}))
         try:
-            generated = self._fh_genie.generate_grounded_fix(
+            generated = self._llm.generate_grounded_fix(
                 state["user_query"],
                 fixes,
             )
@@ -404,6 +678,46 @@ class IncidentNodes:
         return {"answer": "\n".join(answer_parts), "citations": citations}
 
     def request_clarification(self, state: IncidentState) -> dict[str, Any]:
+        if state.get("query_understanding_unavailable"):
+            # Asking the user for more detail cannot help while the semantic
+            # router is down, so end the turn with an honest status instead.
+            return {
+                "answer": (
+                    "The query-understanding service is temporarily unavailable, "
+                    "so I could not interpret your request safely. Please try "
+                    "again shortly."
+                ),
+                "citations": [],
+                "route": "request_clarification",
+                "route_reason": "query understanding service unavailable",
+                "actionable_fix_available": False,
+            }
+        if state.get("evidence_unavailable"):
+            return {
+                "answer": (
+                    "The incident knowledge graph is temporarily unavailable, so "
+                    "I could not search historical incidents. Please try again "
+                    "shortly."
+                ),
+                "citations": [],
+                "route": "request_clarification",
+                "route_reason": "incident evidence retrieval unavailable",
+                "actionable_fix_available": False,
+            }
+        if state.get("out_of_scope"):
+            return {
+                "answer": (
+                    "I can only help with Kubernetes: troubleshooting incidents, "
+                    "questions about reported issues in the knowledge graph, and "
+                    "how Kubernetes works. I answer from read-only evidence and "
+                    "cannot change data or run commands. Please ask a "
+                    "Kubernetes question."
+                ),
+                "citations": [],
+                "route": "request_clarification",
+                "route_reason": "query outside the assistant's scope",
+                "actionable_fix_available": False,
+            }
         missing = self._clarification_details(
             state,
             after_no_match=bool(
@@ -544,6 +858,10 @@ class IncidentNodes:
             if item
         }
         for issue in matched:
+            # The retriever already applied deterministic component, version, error,
+            # and symptom-term reranking; its acceptance is the authoritative check.
+            if (issue.get("relevance") or {}).get("accepted"):
+                return True
             issue_components = {
                 str(item).casefold() for item in issue.get("components", [])
             }
@@ -634,31 +952,61 @@ class IncidentNodes:
             entities=state.get("entities", []),
         )
 
-    @staticmethod
-    def _format_graph_results(rows: list[dict[str, Any]]) -> str:
-        if not rows:
-            return "The knowledge graph returned no matching results."
-        return "Graph results:\n" + "\n".join(
-            "- " + ", ".join(f"{key}: {value}" for key, value in row.items())
-            for row in rows
-        )
-
-    @staticmethod
+    @classmethod
     def _analytics_cypher(
+        cls,
         understanding: QueryUnderstanding,
     ) -> CypherGeneration | None:
+        if understanding.extra_conditions:
+            # Templates filter only by component and version; dropping a
+            # condition such as "has a verified fix" would answer a different
+            # question, so the model writes the query against the full schema.
+            return None
         operation = understanding.analytics_operation
         group_by = understanding.group_by
-        limit = understanding.limit or 20
-        if operation == "TOP_N" and group_by == "component":
+        # One row beyond the displayed limit shows whether the list was cut short.
+        limit = cls._display_limit(understanding) + 1
+        version_condition, version_parameters = cls._version_condition(
+            understanding.versions
+        )
+        version_match = (
+            "MATCH (i)-[:REPORTED_IN_VERSION]->(v:KubernetesVersion) "
+            f"WHERE {version_condition} "
+            if version_condition
+            else ""
+        )
+        if (
+            operation == "TOP_N"
+            and group_by == "component"
+            and len(understanding.components) == 1
+        ):
+            # Ranking a single named component is meaningless: "the most common
+            # kubelet issues" asks for that component's top issues.
+            group_by = "issue"
+        if operation == "COUNT" and group_by is None and understanding.components:
+            # "How many issues affect the CSI driver?" counts per named component.
+            group_by = "component"
+        if operation in {"TOP_N", "COUNT", "GROUP_BY"} and group_by == "component":
+            parameters = dict(version_parameters)
+            component_filter = ""
+            if understanding.components:
+                # Named components restrict the counts ("kubelet or etcd?");
+                # without them every component is ranked.
+                component_filter = f"WHERE {COMPONENT_KEY} IN $components "
+                parameters["components"] = list(dict.fromkeys(
+                    cls._component_key(component)
+                    for component in understanding.components
+                ))
             return CypherGeneration(
                 cypher=(
                     "MATCH (i:Issue)-[:AFFECTS_COMPONENT]->(c:Component) "
-                    "RETURN c.name AS component, count(DISTINCT i) AS issue_count "
+                    + component_filter
+                    + version_match
+                    + "RETURN c.name AS component, count(DISTINCT i) AS issue_count "
                     f"ORDER BY issue_count DESC LIMIT {limit}"
                 ),
-                parameters={},
-                explanation="Rank components by distinct issue count",
+                parameters=parameters,
+                explanation="Count distinct issues per component",
             )
         if operation in {"COUNT", "GROUP_BY"} and group_by == "version":
             return CypherGeneration(
@@ -671,15 +1019,17 @@ class IncidentNodes:
                 parameters={},
                 explanation="Count incidents by Kubernetes version",
             )
-        if operation == "RELATIONSHIP" and len(understanding.components) >= 2:
+        # Two or more named components mean "issues involving all of them",
+        # whether the model called it a relationship or a list.
+        if operation in {"RELATIONSHIP", "LIST"} and len(understanding.components) >= 2:
             components = list(dict.fromkeys(
-                component.lower() for component in understanding.components
+                cls._component_key(component) for component in understanding.components
             ))
             return CypherGeneration(
                 cypher=(
                     "MATCH (i:Issue)-[:AFFECTS_COMPONENT]->(c:Component) "
-                    "WHERE toLower(c.name) IN $components "
-                    "WITH i, count(DISTINCT toLower(c.name)) AS matched_components "
+                    f"WHERE {COMPONENT_KEY} IN $components "
+                    f"WITH i, count(DISTINCT {COMPONENT_KEY}) AS matched_components "
                     "WHERE matched_components = $component_count "
                     "RETURN i.issue_number AS issue_number, i.title AS title, "
                     f"i.html_url AS url ORDER BY issue_number DESC LIMIT {limit}"
@@ -690,40 +1040,62 @@ class IncidentNodes:
                 },
                 explanation="Find issues connected to every requested component",
             )
-        if operation == "LIST" and group_by == "issue" and understanding.components:
-            parameters: dict[str, Any] = {
-                "component": understanding.components[0].lower(),
-            }
-            version_match = ""
-            version_filter = ""
-            if understanding.versions:
-                version_match = (
-                    "MATCH (i)-[:REPORTED_IN_VERSION]->(v:KubernetesVersion) "
+        # A LIST without a grouping still asks for issues ("list the issues
+        # affecting the scheduler"); leaving it to model Cypher made the result
+        # depend on how the model chose to match the component.
+        if (operation == "TOP_N" and group_by == "issue") or (
+            operation == "LIST" and group_by in {None, "issue"}
+        ):
+            parameters: dict[str, Any] = dict(version_parameters)
+            component_match = ""
+            if understanding.components:
+                component_match = (
+                    "MATCH (i)-[:AFFECTS_COMPONENT]->(c:Component) "
+                    f"WHERE {COMPONENT_KEY} = $component "
                 )
-                version_filter = " AND v.version = $version"
-                parameters["version"] = understanding.versions[0]
+                parameters["component"] = cls._component_key(
+                    understanding.components[0]
+                )
             return CypherGeneration(
                 cypher=(
-                    "MATCH (i:Issue)-[:AFFECTS_COMPONENT]->(c:Component) "
+                    "MATCH (i:Issue) "
+                    + component_match
                     + version_match
-                    + "WHERE toLower(c.name) = $component"
-                    + version_filter
-                    + " RETURN i.issue_number AS issue_number, i.title AS title, "
+                    + "WITH DISTINCT i "
+                    "RETURN i.issue_number AS issue_number, i.title AS title, "
                     "i.summary AS summary, i.html_url AS url, "
                     "coalesce(i.comments_count, 0) AS discussion_count "
                     f"ORDER BY discussion_count DESC LIMIT {limit}"
                 ),
                 parameters=parameters,
-                explanation="List issues matching structured component filters",
-            )
-        if operation in {"COUNT", "GROUP_BY"} and group_by == "component":
-            return CypherGeneration(
-                cypher=(
-                    "MATCH (i:Issue)-[:AFFECTS_COMPONENT]->(c:Component) "
-                    "RETURN c.name AS component, count(DISTINCT i) AS issue_count "
-                    f"ORDER BY issue_count DESC LIMIT {limit}"
-                ),
-                parameters={},
-                explanation="Count incidents by component",
+                explanation="List issues matching structured component and version filters",
             )
         return None
+
+    @staticmethod
+    def _component_key(name: str) -> str:
+        """Match ``scheduler`` and ``kube-scheduler`` as the same component."""
+
+        key = name.strip().lower()
+        return key.removeprefix("kube-")
+
+    @staticmethod
+    def _display_limit(understanding: QueryUnderstanding) -> int:
+        return min(understanding.limit or 20, CypherValidator.MAX_LIMIT - 1)
+
+    @staticmethod
+    def _version_condition(versions: list[str]) -> tuple[str, dict[str, Any]]:
+        """Match a requested version at minor granularity.
+
+        Graph versions are stored as reported (``1.35``, ``v1.35.1``, ``v1.35.x``),
+        so exact equality with a user's ``v1.35`` would silently miss most issues.
+        """
+
+        if not versions:
+            return "", {}
+        match = re.search(r"(\d+)\.(\d+)", versions[0])
+        if match is None:
+            return "v.version = $version", {"version": versions[0]}
+        return "v.version =~ $version_pattern", {
+            "version_pattern": rf"^[vV]?{match[1]}\.{match[2]}(?:\D.*)?$"
+        }

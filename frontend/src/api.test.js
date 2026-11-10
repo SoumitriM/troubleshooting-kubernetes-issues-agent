@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { requestKnowledge } from "./api";
+import { requestKnowledge, sendChatMessage } from "./api";
 
 
 afterEach(() => vi.unstubAllGlobals());
@@ -49,5 +49,30 @@ describe("knowledge API integration", () => {
     await expect(requestKnowledge({ query: "Question" })).rejects.toThrow(
       "Conversation thread already exists",
     );
+  });
+});
+
+describe("chat API integration", () => {
+  it("starts a conversation without an id and continues it with one", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response({ conversation_id: "c1" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await sendChatMessage({ message: "What does kubelet do?" });
+    await sendChatMessage({ message: "And the scheduler?", conversationId: "c1" });
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/chat");
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ message: "What does kubelet do?" });
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
+      message: "And the scheduler?",
+      conversation_id: "c1",
+    });
+  });
+
+  it("exposes the HTTP status on failures", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({ detail: "Conversation was not found" }, 404)));
+    await expect(sendChatMessage({ message: "Hi", conversationId: "gone" })).rejects.toMatchObject({
+      message: "Conversation was not found",
+      status: 404,
+    });
   });
 });

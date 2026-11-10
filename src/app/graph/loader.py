@@ -23,7 +23,7 @@ class GraphSettings(BaseSettings):
 
 
 class GraphIssueRecord(GitHubIssue):
-    """A normalized issue with optional FH Genie enrichment."""
+    """A normalized issue with optional Claude enrichment."""
 
     enrichment: IssueEnrichment | None = None
     resolution_evidence: ResolutionEvidence | None = None

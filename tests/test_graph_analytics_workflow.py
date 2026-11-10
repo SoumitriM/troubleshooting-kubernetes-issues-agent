@@ -118,8 +118,61 @@ def test_common_issue_analytics_works_without_model_endpoint() -> None:
     cypher, parameters = repository.calls[0]
     assert "AFFECTS_COMPONENT" in cypher
     assert "REPORTED_IN_VERSION" in cypher
-    assert parameters == {"component": "kubelet", "version": "v1.35"}
+    assert parameters == {
+        "component": "kubelet",
+        "version_pattern": r"^[vV]?1\.35(?:\D.*)?$",
+    }
     assert result["route"] == "answer_from_graph"
+
+
+def test_version_filter_matches_stored_version_variants() -> None:
+    import re
+
+    generated = IncidentNodes._analytics_cypher(QueryUnderstanding(
+        normalized_query="placeholder",
+        intent="GRAPH_ANALYTICS",
+        intent_confidence=0.99,
+        versions=["v1.35"],
+        analytics_operation="TOP_N",
+        group_by="issue",
+        reasoning="Most discussed issues in a version",
+    ))
+
+    assert generated is not None
+    pattern = re.compile(generated.parameters["version_pattern"])
+    for stored in ["1.35", "v1.35", "v1.35.1", "v1.35.x", "V1.35.0-rc.0"]:
+        assert pattern.fullmatch(stored), stored
+    for stored in ["1.350", "v1.36.1", "v11.35"]:
+        assert not pattern.fullmatch(stored), stored
+
+
+def test_every_structured_template_passes_cypher_validation() -> None:
+    from app.graph.cypher_validation import CypherValidator
+
+    cases = [
+        ("TOP_N", "component", ["kubelet"], ["v1.35"]),
+        ("COUNT", "component", [], []),
+        ("COUNT", "component", ["etcd"], ["v1.36"]),
+        ("GROUP_BY", "version", [], []),
+        ("RELATIONSHIP", "issue", ["kubelet", "etcd"], []),
+        ("LIST", "issue", ["kubelet"], ["v1.35"]),
+        ("TOP_N", "issue", [], ["1.36"]),
+        ("LIST", "issue", [], []),
+    ]
+    for operation, group_by, components, versions in cases:
+        generated = IncidentNodes._analytics_cypher(QueryUnderstanding(
+            normalized_query="placeholder",
+            intent="GRAPH_ANALYTICS",
+            intent_confidence=0.99,
+            components=components,
+            versions=versions,
+            analytics_operation=operation,
+            group_by=group_by,
+            reasoning="Structured analytics",
+        ))
+        assert generated is not None, (operation, group_by)
+        result = CypherValidator().validate(generated.cypher, generated.parameters)
+        assert result.valid, (operation, group_by, result.errors)
 
 
 def test_component_counts_work_without_model_endpoint() -> None:
@@ -157,7 +210,7 @@ def test_structured_relationship_uses_safe_template() -> None:
         "components": ["kubelet", "etcd"],
         "component_count": 2,
     }
-    assert "LIMIT 10" in generated.cypher
+    assert "LIMIT 11" in generated.cypher  # one extra row detects truncation
 
 
 def test_structured_top_n_honors_validated_limit() -> None:
@@ -173,7 +226,7 @@ def test_structured_top_n_honors_validated_limit() -> None:
 
     assert generated is not None
     assert "count(DISTINCT i) AS issue_count" in generated.cypher
-    assert "LIMIT 5" in generated.cypher
+    assert "LIMIT 6" in generated.cypher  # one extra row detects truncation
 
 
 def test_structured_version_grouping_uses_version_relationship() -> None:
@@ -189,3 +242,72 @@ def test_structured_version_grouping_uses_version_relationship() -> None:
     assert generated is not None
     assert "REPORTED_IN_VERSION" in generated.cypher
     assert "incident_count" in generated.cypher
+
+
+def test_component_count_is_limited_to_named_components() -> None:
+    generated = IncidentNodes._analytics_cypher(QueryUnderstanding(
+        normalized_query="How many issues affect etcd?",
+        intent="GRAPH_ANALYTICS",
+        intent_confidence=0.99,
+        components=["etcd"],
+        analytics_operation="COUNT",
+        group_by="component",
+        reasoning="Count etcd issues",
+    ))
+
+    assert generated is not None
+    assert "IN $components" in generated.cypher
+    assert generated.parameters == {"components": ["etcd"]}
+
+
+def test_top_n_for_one_named_component_lists_its_issues() -> None:
+    generated = IncidentNodes._analytics_cypher(QueryUnderstanding(
+        normalized_query="What are the most common kubelet issues in v1.36?",
+        intent="GRAPH_ANALYTICS",
+        intent_confidence=0.95,
+        components=["kubelet"],
+        versions=["v1.36"],
+        analytics_operation="TOP_N",
+        group_by="component",
+        limit=10,
+        reasoning="Most common kubelet issues",
+    ))
+
+    assert generated is not None
+    assert "i.issue_number AS issue_number" in generated.cypher
+    assert generated.parameters["component"] == "kubelet"
+    assert "LIMIT 11" in generated.cypher  # one extra row detects truncation
+
+
+def test_list_without_grouping_uses_the_issue_template() -> None:
+    from app.agent.nodes import IncidentNodes
+    from app.agent.state import QueryUnderstanding
+
+    generated = IncidentNodes._analytics_cypher(QueryUnderstanding(
+        normalized_query="List the issues affecting the scheduler",
+        intent="GRAPH_ANALYTICS",
+        intent_confidence=0.9,
+        components=["scheduler"],
+        reasoning="List issues",
+        analytics_operation="LIST",
+    ))
+
+    assert generated is not None
+    assert generated.parameters["component"] == "scheduler"
+    assert "replace(toLower(c.name), 'kube-', '') = $component" in generated.cypher
+
+
+def test_extra_conditions_bypass_templates() -> None:
+    from app.agent.nodes import IncidentNodes
+    from app.agent.state import QueryUnderstanding
+
+    request = QueryUnderstanding(
+        normalized_query="Which issues have a verified fix linked to a pull request?",
+        intent="GRAPH_ANALYTICS",
+        intent_confidence=0.9,
+        reasoning="List issues with a condition",
+        analytics_operation="LIST",
+        extra_conditions=["has a verified fix", "linked to a pull request"],
+    )
+
+    assert IncidentNodes._analytics_cypher(request) is None

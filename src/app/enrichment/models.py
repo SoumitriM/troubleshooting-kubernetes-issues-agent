@@ -2,7 +2,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class IssueEnrichment(BaseModel):
-    """Structured facts extracted from an issue by FH Genie."""
+    """Structured facts extracted from an issue by Claude."""
 
     model_config = ConfigDict(extra="forbid")
 

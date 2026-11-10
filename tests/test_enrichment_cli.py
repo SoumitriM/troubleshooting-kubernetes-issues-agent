@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.enrichment import cli
-from app.enrichment.fh_genie_client import EnrichmentResponseError
+from app.enrichment.claude_client import EnrichmentResponseError
 from app.enrichment.models import IssueEnrichment
 
 
@@ -154,8 +154,8 @@ def test_cli_uses_settings_and_client_without_real_api_call(
     output_path = tmp_path / "enriched.jsonl"
     write_issues(input_path)
 
-    monkeypatch.setattr(cli, "EnrichmentSettings", lambda: SimpleNamespace())
-    monkeypatch.setattr(cli, "FHGenieClient", lambda _settings: FakeClient())
+    monkeypatch.setattr(cli, "ClaudeSettings", lambda: SimpleNamespace())
+    monkeypatch.setattr(cli, "ClaudeClient", lambda _settings: FakeClient())
     monkeypatch.setattr(
         sys,
         "argv",

@@ -13,7 +13,7 @@ from neo4j import GraphDatabase
 
 from app.agent.nodes import AgentSettings, IncidentNodes
 from app.agent.workflow import build_workflow
-from app.enrichment.fh_genie_client import EnrichmentSettings, FHGenieClient
+from app.enrichment.claude_client import ClaudeClient, ClaudeSettings
 from app.graph.loader import GraphSettings
 from app.retrieval.embeddings import IssueEmbedder
 from app.retrieval.graph_retriever import GraphRetriever
@@ -179,10 +179,10 @@ def main() -> None:
             ),
         )
         try:
-            fh_genie = FHGenieClient(EnrichmentSettings())
+            llm = ClaudeClient(ClaudeSettings())
             retriever = GraphRetriever(driver, IssueEmbedder())
             workflow = build_workflow(
-                IncidentNodes(fh_genie, retriever, AgentSettings())
+                IncidentNodes(llm, retriever, AgentSettings())
             )
             if args.debug:
                 result, executed_nodes = _run_debug(workflow, args.query)

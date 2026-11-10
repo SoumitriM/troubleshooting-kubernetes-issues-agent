@@ -1,21 +1,40 @@
 # AI Incident Resolution Platform
 
 Initial FastAPI service for an AI-assisted incident-resolution platform. It
-provides a React frontend, health endpoint, GitHub issue ingestion, FH Genie
+provides a React frontend, health endpoint, GitHub issue ingestion, Claude
 issue enrichment, a local Neo4j graph loader, semantic issue and official
 Kubernetes documentation search, and an evidence-grounded incident-analysis
 API. Local Kubernetes manifests are provided under `k8s/`.
 
 The shared LangGraph workflow also exposes a Kubernetes knowledge endpoint. One
-validated FH Genie call produces the normalized query, intent, components,
+validated Claude call produces the normalized query, intent, components,
 symptoms, errors, versions, incident sufficiency, and structured analytics
 operation reused throughout the graph. If that service is unavailable, semantic
-routing fails closed instead of recreating a keyword-based NLP engine. The
+routing fails closed instead of recreating a keyword-based NLP engine: the
+request completes with an explicit "temporarily unavailable" answer rather than
+asking the user for incident details that cannot help. Every model call uses
+`LLM_MODEL` (default `claude-opus-5-5`) with schema-constrained structured
+outputs, is validated again with Pydantic, and is retried once with the
+validation error. Calls time out after `LLM_TIMEOUT_SECONDS` (default 60) with
+`LLM_MAX_RETRIES` (default 1). `LLM_EFFORT` (default `low`) sets Claude's
+thinking effort. Server-side refusal fallback is on by default; set
+`LLM_REFUSAL_FALLBACK=false` to disable it. Settings use an `LLM_` prefix
+because Claude tooling exports `CLAUDE_*` variables to child processes. For local development without an API key, set
+`LLM_BACKEND=claude_code` to run each call through headless Claude Code
+(`claude -p`, no tools or sessions) using its existing login;
+`LLM_CLAUDE_CODE_PATH` points at the `claude` binary (version 2.1.280 or newer
+for `claude-opus-5-5`). Containers keep the default `api` backend. The API also becomes ready when Neo4j is still starting; the driver
+connects lazily and graph-backed routes recover once Neo4j is reachable. The
 existing incident evidence thresholds and citation safeguards remain
 deterministic. Graph analytics maps structured operations to validated,
 read-only Cypher templates. General conceptual answers use a separate local
 vector index built only from the official English Kubernetes documentation and
 include links to the retrieved source pages.
+
+## Documentation
+
+Guides on architecture, local development without Docker, configuration,
+the LLM integration, the HTTP API and evaluation are in [`docs/`](docs/README.md).
 
 ## Prerequisites
 
@@ -48,8 +67,8 @@ cp .env.example .env
 authenticated GitHub API rate limits. Never commit the `.env` file.
 
 Set `NEO4J_USERNAME` and `NEO4J_PASSWORD` in `.env` before starting Neo4j.
-For issue enrichment, set `FH_GENIE_KEY`, `FH_GENIE_BASE_URL`, and
-`FH_GENIE_MODEL`. The key is loaded as a secret and must never be committed.
+Set `ANTHROPIC_API_KEY` for every model call (query understanding, answers,
+and enrichment). The key is loaded as a secret and must never be committed.
 
 Run the API locally:
 
@@ -106,9 +125,9 @@ the FastAPI process on port 8000.
 
 ## Docker Compose
 
-Copy `.env.example` to `.env` and configure the Neo4j credentials and FH Genie
-settings before building. Compose injects `FH_GENIE_KEY`,
-`FH_GENIE_BASE_URL`, and `FH_GENIE_MODEL` from that runtime file; `.env` is
+Copy `.env.example` to `.env` and configure the Neo4j credentials and
+`ANTHROPIC_API_KEY` before building. Compose injects `ANTHROPIC_API_KEY` and the
+optional `LLM_*` settings from that runtime file; `.env` is
 excluded from the image build context and must not be committed.
 
 Build the FastAPI image:
@@ -195,16 +214,15 @@ docker build -t incident-resolution-ai-app:latest .
 docker build -t incident-resolution-ai-frontend:latest frontend
 ```
 
-Enable Kubernetes in Docker Desktop, then update the non-secret
-`FH_GENIE_BASE_URL` and `FH_GENIE_MODEL` placeholders in
-`k8s/01-configmap.yaml`. Create the namespace and runtime Secret without writing
+Enable Kubernetes in Docker Desktop. Adjust the non-secret `LLM_MODEL` and
+`LLM_EFFORT` values in `k8s/01-configmap.yaml` if needed. Create the namespace and runtime Secret without writing
 real credentials into a manifest:
 
 ```bash
 kubectl apply -f k8s/00-namespace.yaml
 
 kubectl -n incident-ai create secret generic incident-ai-secrets \
-  --from-literal=FH_GENIE_KEY="$FH_GENIE_KEY" \
+  --from-literal=ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   --from-literal=NEO4J_USERNAME="$NEO4J_USERNAME" \
   --from-literal=NEO4J_PASSWORD="$NEO4J_PASSWORD" \
   --from-literal=NEO4J_AUTH="$NEO4J_USERNAME/$NEO4J_PASSWORD"
@@ -369,7 +387,7 @@ allowlisting without pickle fallback. Tests use `InMemorySaver` and make no FH
 Genie or Neo4j calls.
 
 The API never exposes checkpoint state, workflow debug data, embeddings, prompts,
-configuration, or secrets. If Neo4j, FH Genie, the embedding model, or another
+configuration, or secrets. If Neo4j, Claude, the embedding model, or another
 required dependency is unavailable, incident endpoints return a generic HTTP
 503 while `/health` remains available.
 
@@ -378,6 +396,24 @@ Run the tests:
 ```bash
 pytest
 ```
+
+## Golden evaluation
+
+`evals/golden_dataset.json` holds 30 end-to-end queries covering documentation
+answers, graph analytics, verified fixes, incident findings, clarification and
+resume, and safety (a prompt-injected graph deletion and an off-topic question).
+Graph expectations are tied to the 100 issues in `data/processed/`. With the API,
+Neo4j, Claude, and the documentation index running:
+
+```bash
+python evals/run_golden.py --base-url http://127.0.0.1:8000
+python evals/run_golden.py --only graph-04,incident-find-01
+```
+
+Each case checks status, intent, route, required and forbidden answer text, and
+citations; the safety case also verifies the Neo4j Issue count is unchanged.
+Results are written to `evals/results/` (ignored by Git) and the command exits
+non-zero if any case fails.
 
 ## GitHub issue ingestion
 
@@ -396,10 +432,9 @@ excludes pull requests returned by GitHub's Issues API. Each line contains
 only the issue number, title, body, labels, state, timestamps, comment count,
 and HTML URL. Generated files under `data/raw/` are ignored by Git.
 
-## FH Genie issue enrichment
+## Claude issue enrichment
 
-Enrich an ingested JSONL file using the configured FH Genie
-OpenAI-compatible endpoint:
+Enrich an ingested JSONL file with Claude:
 
 ```bash
 python -m app.enrichment.cli \
@@ -453,7 +488,7 @@ does not call an LLM or infer whether an issue was resolved.
 ## Resolution extraction
 
 Extract a grounded resolution from the collected GitHub evidence using the
-existing FH Genie configuration:
+same Claude configuration:
 
 ```bash
 python -m app.enrichment.resolution_cli \
@@ -608,7 +643,7 @@ python -m app.retrieval.cli graph-search \
 The result is one JSON object containing the query, deduplicated vector-matched
 issues with similarity scores and graph metadata, and up to three additional
 issues satisfying the stricter shared-component/version expansion rules. This
-retrieval step is bounded and does not call FH Genie or another language model.
+retrieval step is bounded and does not call Claude or another language model.
 When available,
 matched and related issues include `verified_disposition` with its type, root
 cause, summary, confidence, and supporting evidence URLs. A separate
@@ -644,7 +679,7 @@ records. Both modes reserve stdout for one valid JSON document; model progress
 and actionable diagnostics go to stderr, while the optional unauthenticated
 Hugging Face download advisory is suppressed.
 
-The workflow first uses FH Genie to extract the symptom, components, Kubernetes
+The workflow first uses Claude to extract the symptom, components, Kubernetes
 version, and error messages. A deterministic clarification gate prevents vague
 reports such as “Kubernetes is not working” from reaching Neo4j at all. Detailed
 reports proceed to GraphRAG retrieval, where results must satisfy both the
@@ -689,7 +724,7 @@ Findings cite only the issue pages whose details appear in the answer.
 Resolution evidence URLs are cited only when `generate_fix` actually uses that
 verified resolution.
 
-FH Genie selects an actionable resolution, but its answer summary, steps, and
+Claude selects an actionable resolution, but its answer summary, steps, and
 citations must exactly match retrieved evidence. Unsupported summaries,
 commands, steps, and URLs are rejected. `closed_without_fix`, duplicate,
 non-reproducible, and unknown
@@ -705,10 +740,14 @@ must be between 0 and 1.
 │   ├── api/          # Incident-analysis HTTP routes and Pydantic schemas
 │   ├── agent/        # LangGraph evidence-grounded incident assistant
 │   ├── graph/        # Neo4j graph loader and CLI
-│   ├── enrichment/   # FH Genie client, models, and JSONL CLI
+│   ├── enrichment/   # Claude client, prompts, models, and JSONL CLIs
 │   ├── ingestion/    # GitHub issue and resolution-evidence ingestion
 │   └── retrieval/    # Local embeddings and Neo4j vector search CLI
 ├── tests/            # Automated tests
+├── docs/             # Architecture, configuration, API and evaluation guides
+├── evals/            # Golden dataset and end-to-end evaluation runner
+├── frontend/         # React UI (Vite)
+├── k8s/              # Kubernetes manifests
 ├── .env.example      # Local configuration template
 ├── docker-compose.yml # Local Neo4j Community Edition service
 └── pyproject.toml    # Project metadata and dependencies

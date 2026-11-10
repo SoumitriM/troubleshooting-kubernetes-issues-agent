@@ -4,7 +4,7 @@ import pytest
 
 from app.agent.nodes import AgentSettings, IncidentNodes
 from app.agent.state import QueryAnalysis
-from app.retrieval.graph_retriever import GraphRetriever
+from app.retrieval.graph_retriever import GraphRetriever, GraphRetrieverSettings
 
 
 def analysis(
@@ -829,3 +829,56 @@ def test_exact_structured_error_message_is_an_error_match_not_a_symptom() -> Non
     assert relevance["matching_error_terms"] == ["connection refused"]
     assert "connection" not in relevance["matching_symptom_terms"]
     assert "refused" not in relevance["matching_symptom_terms"]
+
+
+def test_critical_error_in_stored_symptom_counts_as_match() -> None:
+    retriever = GraphRetriever(None, None, GraphRetrieverSettings(_env_file=None))  # type: ignore[arg-type]
+    explanation = retriever._relevance_explanation(
+        {
+            "score": 0.88,
+            "title": "DRA integration test flakes",
+            "summary": "Pod scheduling times out",
+            "symptom": "The pod enters SchedulerError state during PreBind",
+            "components": ["dynamicresources"],
+            "error_messages": ["Timed out after 60.000s."],
+        },
+        QueryAnalysis(
+            symptom="Pod fails to schedule during PreBind",
+            components=["dynamicresources"],
+            error_messages=["SchedulerError"],
+            has_sufficient_details=True,
+        ),
+    )
+
+    assert "critical_error_mismatch" not in explanation["rejection_reasons"]
+    assert explanation["accepted"] is True
+
+
+@pytest.mark.parametrize(
+    ("requested", "candidate", "expected"),
+    [
+        ("e2e-up.sh", "hack/e2e-internal/e2e-up.sh", True),
+        ("Kubernetes Scheduler", "scheduler", True),
+        ("DynamicResources plugin", "dynamicresources", True),
+        ("GCE", "ci-kubernetes-e2e-gci-gce", True),
+        ("kube_controller_manager", "kube-controller-manager", True),
+        ("PreBind plugin", "plugin", False),
+        ("Kubernetes", "ci-kubernetes-e2e-gci-gce", False),
+        ("etcd", "kubelet", False),
+    ],
+)
+def test_component_names_match_across_qualification(
+    requested: str, candidate: str, expected: bool
+) -> None:
+    assert GraphRetriever._components_match(
+        GraphRetriever._normalize_phrase(requested),
+        GraphRetriever._normalize_phrase(candidate),
+    ) is expected
+
+
+def test_component_match_ignores_generic_words_on_both_sides() -> None:
+    from app.retrieval.graph_retriever import GraphRetriever
+
+    assert GraphRetriever._components_match("gce e2e job", "gce e2e")
+    assert GraphRetriever._components_match("scheduler", "kubernetes scheduler")
+    assert not GraphRetriever._components_match("test job", "kubelet")

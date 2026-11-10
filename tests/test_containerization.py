@@ -53,7 +53,7 @@ def test_compose_adds_single_persistent_healthy_application_service() -> None:
     assert "- .env" in compose
     assert "condition: service_healthy" in compose
     assert "http://127.0.0.1:8000/ready" in compose
-    assert "FH_GENIE_KEY:" not in compose
+    assert "ANTHROPIC_API_KEY:" not in compose
     assert "frontend:" in compose
     assert '"5173:8080"' in compose
     assert "incident-resolution-ai" in compose

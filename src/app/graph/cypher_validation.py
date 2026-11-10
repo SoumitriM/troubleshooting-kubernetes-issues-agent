@@ -25,7 +25,7 @@ class CypherValidator:
     LABEL = re.compile(r"\([A-Za-z_]\w*\s*:\s*`?([A-Za-z_]\w*)`?")
     RELATIONSHIP = re.compile(r"\[[^\]]*:\s*`?([A-Za-z_]\w*)`?")
     PARAMETER = re.compile(r"\$([A-Za-z_]\w*)")
-    LIMIT = re.compile(r"\bLIMIT\s+(\d+)\b", re.IGNORECASE)
+    LIMIT = re.compile(r"\bLIMIT\s+(?:(\d+)\b|\$([A-Za-z_]\w*))", re.IGNORECASE)
     INLINE_COMPARISON = re.compile(
         r"(?:=|<>|<=|>=|<|>)\s*(?:'[^']*'|\"[^\"]*\"|\d+(?:\.\d+)?)",
         re.IGNORECASE,
@@ -75,6 +75,13 @@ class CypherValidator:
         limit = self.LIMIT.search(query)
         if limit is None:
             errors.append("query must enforce LIMIT")
-        elif int(limit.group(1)) > self.MAX_LIMIT:
-            errors.append(f"LIMIT must not exceed {self.MAX_LIMIT}")
+        else:
+            # A parameterized LIMIT is accepted only when it is a bounded integer.
+            value = (
+                int(limit.group(1)) if limit.group(1) else parameters.get(limit.group(2))
+            )
+            if not isinstance(value, int) or isinstance(value, bool):
+                errors.append("LIMIT must be an integer")
+            elif not 0 < value <= self.MAX_LIMIT:
+                errors.append(f"LIMIT must be between 1 and {self.MAX_LIMIT}")
         return CypherValidationResult(not errors, tuple(errors))

@@ -31,8 +31,8 @@ def test_agent_cli_uses_mocked_dependencies(
         ),
     )
     monkeypatch.setattr(cli.GraphDatabase, "driver", lambda *_args, **_kwargs: driver)
-    monkeypatch.setattr(cli, "EnrichmentSettings", lambda: object())
-    monkeypatch.setattr(cli, "FHGenieClient", lambda _settings: object())
+    monkeypatch.setattr(cli, "ClaudeSettings", lambda: object())
+    monkeypatch.setattr(cli, "ClaudeClient", lambda _settings: object())
     monkeypatch.setattr(cli, "IssueEmbedder", lambda: object())
     monkeypatch.setattr(cli, "GraphRetriever", lambda *_args: object())
     monkeypatch.setattr(cli, "AgentSettings", lambda: object())
@@ -153,8 +153,8 @@ def test_agent_cli_debug_streams_sanitized_execution_trace(
         ),
     )
     monkeypatch.setattr(cli.GraphDatabase, "driver", lambda *_args, **_kwargs: driver)
-    monkeypatch.setattr(cli, "EnrichmentSettings", lambda: object())
-    monkeypatch.setattr(cli, "FHGenieClient", lambda _settings: object())
+    monkeypatch.setattr(cli, "ClaudeSettings", lambda: object())
+    monkeypatch.setattr(cli, "ClaudeClient", lambda _settings: object())
     def noisy_embedder() -> object:
         print("model progress must be on stderr")
         logging.getLogger("huggingface_hub").warning(

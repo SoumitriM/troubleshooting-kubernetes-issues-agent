@@ -42,3 +42,12 @@ def test_rejects_unparameterized_filters_and_missing_parameters() -> None:
     )
     assert any("parameters" in error for error in inline.errors)
     assert any("missing parameters" in error for error in missing.errors)
+
+
+def test_parameterized_limit_must_be_a_bounded_integer() -> None:
+    validator = CypherValidator()
+    query = "MATCH (i:Issue) RETURN i.issue_number LIMIT $limit"
+
+    assert validator.validate(query, {"limit": 50}).valid
+    assert "LIMIT must be between 1 and 100" in validator.validate(query, {"limit": 500}).errors
+    assert "LIMIT must be an integer" in validator.validate(query, {"limit": "50"}).errors

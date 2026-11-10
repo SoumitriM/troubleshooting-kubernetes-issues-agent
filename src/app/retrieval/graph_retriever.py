@@ -131,6 +131,9 @@ class GraphRetriever:
         "imagepullbackoff",
         "oomkilled",
     }
+    GENERIC_COMPONENT_TOKENS = frozenset(
+        {"component", "controller", "job", "k8s", "kubernetes", "plugin", "test"}
+    )
     KUBERNETES_TERMS = {"kubernetes", "kubelet", "node", "pod", "pods"}
     GENERIC_ERRORS = {"broken", "error", "failed", "failure", "problem"}
     STEMMER = snowballstemmer.stemmer("english")
@@ -204,6 +207,7 @@ class GraphRetriever:
            issue.issue_number AS issue_number,
            issue.title AS title,
            issue.summary AS summary,
+           issue.symptom AS symptom,
            issue.html_url AS url,
            score,
            components,
@@ -482,7 +486,14 @@ class GraphRetriever:
         vector_similarity = float(candidate.get("score") or 0.0)
         requested_components = self._value_map(query_analysis.components)
         candidate_components = self._value_map(candidate.get("components", []))
-        component_keys = set(requested_components) & set(candidate_components)
+        component_keys = {
+            candidate_key
+            for candidate_key in candidate_components
+            if any(
+                self._components_match(requested_key, candidate_key)
+                for requested_key in requested_components
+            )
+        }
         matching_components = sorted(
             candidate_components[key] for key in component_keys
         )
@@ -501,6 +512,7 @@ class GraphRetriever:
             [
                 str(candidate.get("title") or ""),
                 str(candidate.get("summary") or ""),
+                str(candidate.get("symptom") or ""),
                 *candidate.get("error_messages", []),
             ]
         )
@@ -530,10 +542,16 @@ class GraphRetriever:
             for term in component.split()
         }
         excluded_terms.update(component_terms)
+        # A component name is already scored as a component match; counting it
+        # again as a symptom term let any issue sharing only the component (and
+        # version) pass as a symptom match. Symptom terms are keyed by their raw
+        # lowercase spelling (``kube-controller-manager``), so compare normalized.
         diagnostic_terms = {
             key: original
             for key, original in diagnostic_terms.items()
             if key not in excluded_terms
+            and self._normalize_phrase(key) not in requested_components
+            and not set(self._normalize_phrase(key).split()) <= component_terms
         }
         candidate_terms = self._distinctive_term_map(candidate_text)
         matching_symptom_terms = sorted(
@@ -631,6 +649,29 @@ class GraphRetriever:
     @staticmethod
     def _normalize_phrase(value: str) -> str:
         return " ".join(re.findall(r"[a-z0-9]+", value.lower())).strip()
+
+    @classmethod
+    def _components_match(cls, requested: str, candidate: str) -> bool:
+        """Match normalized component names that differ only in qualification.
+
+        Query understanding and issue enrichment name the same component
+        differently (``e2e-up.sh`` vs ``hack/e2e-internal/e2e-up.sh``, ``Kubernetes
+        Scheduler`` vs ``scheduler``), so one name's tokens may be a subset of the
+        other's, provided the shorter name has a non-generic token.
+        """
+
+        if requested == candidate:
+            return True
+        if requested.replace(" ", "") == candidate.replace(" ", ""):
+            return True
+        # Generic words ("job", "test", "controller") are ignored on both sides,
+        # so "GCE e2e job" still matches a component named "gce e2e".
+        requested_tokens = set(requested.split()) - cls.GENERIC_COMPONENT_TOKENS
+        candidate_tokens = set(candidate.split()) - cls.GENERIC_COMPONENT_TOKENS
+        smaller, larger = sorted(
+            (requested_tokens, candidate_tokens), key=len
+        )
+        return bool(smaller) and smaller <= larger
 
     @classmethod
     def _value_map(cls, values: list[str]) -> dict[str, str]:

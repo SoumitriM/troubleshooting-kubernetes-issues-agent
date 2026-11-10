@@ -12,7 +12,9 @@ Intent = Literal[
 ]
 AnalyticsOperation = Literal["COUNT", "GROUP_BY", "TOP_N", "RELATIONSHIP", "LIST"]
 AnalyticsGroup = Literal["component", "version", "issue"]
+EvidenceSource = Literal["incidents", "analytics", "docs"]
 Route = Literal[
+    "research_answer",
     "generate_fix",
     "generate_findings",
     "answer_from_graph",
@@ -58,6 +60,14 @@ class QueryUnderstanding(BaseModel):
     error_messages: list[str] = Field(default_factory=list)
     observed_behavior: str | None = None
     has_concrete_incident: bool = False
+    # False for non-Kubernetes questions and for requests to change data or
+    # run commands; such queries get a scope answer instead of clarification.
+    in_scope: bool = True
+    # Evidence sources the question needs; two or more route to research.
+    sources: list[EvidenceSource] = Field(default_factory=list)
+    # Analytics conditions the component/version templates cannot express
+    # ("has a verified fix", "linked to a pull request", "closed in July").
+    extra_conditions: list[str] = Field(default_factory=list)
     reasoning: str = Field(min_length=1, max_length=500)
     analytics_operation: AnalyticsOperation | None = None
     group_by: AnalyticsGroup | None = None
@@ -95,9 +105,15 @@ class IncidentState(TypedDict, total=False):
     clarification_history: list[str]
     clarification_attempts: int
     clarification_exhausted: bool
+    # Earlier turns of a chat conversation ({"role", "content"}), used only to
+    # resolve follow-up references when interpreting the current query.
+    conversation_history: list[dict[str, str]]
     debug: bool
     query_analysis: QueryAnalysis
     query_understanding: QueryUnderstanding
+    query_understanding_unavailable: bool
+    out_of_scope: bool
+    evidence_unavailable: bool
     normalized_query: str
     normalized_symptoms: list[str]
     intent: Intent
@@ -109,6 +125,13 @@ class IncidentState(TypedDict, total=False):
     cypher_explanation: str
     cypher_validation_errors: list[str]
     graph_results: list[dict[str, Any]]
+    graph_display_limit: int | None
+    graph_limit_probed: bool
+    cypher_source: str
+    alternative_attempted: bool
+    alternative_hints: list[str]
+    research_steps: list[dict[str, Any]]
+    research_failed: bool
     documentation_results: list[dict[str, Any]]
     cypher_attempt_count: int
     extracted_symptom: str | None
@@ -126,8 +149,39 @@ class IncidentState(TypedDict, total=False):
     citations: list[str]
 
 
+class IncidentMatchJudgement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    issue_number: int
+    relation: Literal["same_failure", "related", "unrelated"]
+
+
+class IncidentMatchVerification(BaseModel):
+    """Model labels for retrieved candidates; may only narrow retrieval."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    judgements: list[IncidentMatchJudgement]
+
+
+class ResearchStep(BaseModel):
+    """One step of the bounded multi-source research loop."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["search_incidents", "graph_analytics", "search_docs", "final_answer"]
+    reason: str = Field(min_length=1, max_length=300)
+    query: str | None = None
+    operation: AnalyticsOperation | None = None
+    group_by: AnalyticsGroup | None = None
+    components: list[str] = Field(default_factory=list)
+    versions: list[str] = Field(default_factory=list)
+    answer: str | None = None
+    citations: list[str] = Field(default_factory=list)
+
+
 class GroundedFixAnswer(BaseModel):
-    """Validated FH Genie output constrained to retrieved evidence."""
+    """Validated model output constrained to retrieved evidence."""
 
     model_config = ConfigDict(extra="forbid")
 

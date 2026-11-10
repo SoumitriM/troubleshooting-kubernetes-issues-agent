@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.enrichment import resolution_cli
-from app.enrichment.fh_genie_client import EnrichmentResponseError
+from app.enrichment.claude_client import EnrichmentResponseError
 from app.enrichment.resolution_models import IssueResolution
 
 
@@ -65,13 +65,13 @@ def test_failed_record_is_retried_and_does_not_stop_later_issues(tmp_path: Path)
     assert len(output_path.read_text().splitlines()) == 2
 
 
-def test_resolution_cli_uses_existing_fh_genie_configuration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_resolution_cli_uses_existing_claude_configuration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     input_path, output_path = tmp_path / "input.jsonl", tmp_path / "output.jsonl"
     write_jsonl(input_path, [issue_record(1)])
     settings = SimpleNamespace(); client = MagicMock(); client.extract_resolution.return_value = unresolved()
     client_factory = MagicMock(return_value=client)
-    monkeypatch.setattr(resolution_cli, "EnrichmentSettings", lambda: settings)
-    monkeypatch.setattr(resolution_cli, "FHGenieClient", client_factory)
+    monkeypatch.setattr(resolution_cli, "ClaudeSettings", lambda: settings)
+    monkeypatch.setattr(resolution_cli, "ClaudeClient", client_factory)
     monkeypatch.setattr(sys, "argv", ["app.enrichment.resolution_cli", "--input",
         str(input_path), "--output", str(output_path), "--limit", "1"])
     resolution_cli.main()

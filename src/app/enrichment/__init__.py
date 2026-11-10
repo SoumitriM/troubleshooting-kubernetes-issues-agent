@@ -1,1 +1,1 @@
-"""FH Genie issue enrichment package."""
+"""Claude issue enrichment package."""

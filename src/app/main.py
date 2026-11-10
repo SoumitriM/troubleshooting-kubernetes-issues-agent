@@ -11,13 +11,16 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from neo4j import Driver, GraphDatabase
+from neo4j.exceptions import ServiceUnavailable
 
 from app.agent.checkpointing import strict_checkpoint_serializer
 from app.agent.nodes import AgentSettings, IncidentNodes
 from app.agent.workflow import build_workflow
+from app.api.chat import router as chat_router
 from app.api.incidents import router as incidents_router
 from app.api.knowledge import router as knowledge_router
-from app.enrichment.fh_genie_client import EnrichmentSettings, FHGenieClient
+from app.chat.store import ConversationStore
+from app.enrichment.claude_client import ClaudeClient, ClaudeSettings
 from app.graph.loader import GraphSettings
 from app.graph.analytics import GraphAnalyticsRepository
 from app.retrieval.embeddings import IssueEmbedder
@@ -44,22 +47,37 @@ def build_agent_resources(checkpointer: Any | None = None) -> AgentResources:
             graph_settings.neo4j_username,
             graph_settings.neo4j_password.get_secret_value(),
         ),
+        # Keep an unreachable database within the request budget instead of the
+        # driver's default 30 s managed-transaction retry window plus back-off.
+        connection_timeout=10.0,
+        max_transaction_retry_time=5.0,
     )
     try:
-        driver.verify_connectivity()
+        try:
+            driver.verify_connectivity()
+        except ServiceUnavailable:
+            # Neo4j may still be starting (Compose restarts, Kubernetes pods start
+            # in parallel). The driver connects lazily, so graph-backed requests
+            # recover once it is reachable instead of leaving the API never ready.
+            LOGGER.warning("Neo4j is not reachable yet; graph routes will retry")
         embedder = IssueEmbedder()
         agent_settings = AgentSettings()
+        documentation_store = DocumentationStore(
+            agent_settings.documentation_index_path,
+            embedder,
+        )
+        try:
+            documentation_store.preload()
+        except Exception:
+            LOGGER.exception("Documentation index could not be preloaded")
         workflow = build_workflow(
             IncidentNodes(
-                FHGenieClient(EnrichmentSettings()),
+                ClaudeClient(ClaudeSettings()),
                 GraphRetriever(driver, embedder),
                 agent_settings,
                 analytics_repository=GraphAnalyticsRepository(driver),
                 documentation_retriever=KubernetesDocsRetriever(
-                    DocumentationStore(
-                        agent_settings.documentation_index_path,
-                        embedder,
-                    )
+                    documentation_store
                 ),
                 enable_interrupts=checkpointer is not None,
             ),
@@ -79,7 +97,21 @@ def create_app(
         application.state.incident_workflow = None
         application.state.neo4j_driver = None
         application.state.incident_checkpointer = None
+        application.state.conversation_store = None
         checkpoint_connection = None
+        chat_connection = None
+        try:
+            # Injected resources (tests) get a throwaway in-memory chat store.
+            chat_path = ":memory:"
+            if resource_factory is None:
+                Path("data").mkdir(exist_ok=True)
+                chat_path = "data/conversations.sqlite"
+            chat_connection = await aiosqlite.connect(chat_path)
+            conversation_store = ConversationStore(chat_connection)
+            await conversation_store.setup()
+            application.state.conversation_store = conversation_store
+        except Exception:
+            LOGGER.exception("Chat conversation store unavailable at startup")
         try:
             if resource_factory is None:
                 checkpoint_path = Path("data/checkpoints.sqlite")
@@ -102,7 +134,7 @@ def create_app(
             application.state.incident_workflow = resources.workflow
             application.state.neo4j_driver = resources.driver
         except Exception:
-            LOGGER.error("Incident analysis dependencies unavailable at startup")
+            LOGGER.exception("Incident analysis dependencies unavailable at startup")
         try:
             yield
         finally:
@@ -111,6 +143,8 @@ def create_app(
                 await run_in_threadpool(driver.close)
             if checkpoint_connection is not None:
                 await checkpoint_connection.close()
+            if chat_connection is not None:
+                await chat_connection.close()
 
     application = FastAPI(
         title="AI Incident Resolution Platform",
@@ -118,6 +152,7 @@ def create_app(
     )
     application.include_router(incidents_router)
     application.include_router(knowledge_router)
+    application.include_router(chat_router)
 
     @application.get("/health")
     def health() -> dict[str, str]:
