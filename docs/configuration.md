@@ -27,6 +27,33 @@ These use an `LLM_` prefix rather than `CLAUDE_` because Claude Code exports
 `CLAUDE_*` variables (such as `CLAUDE_EFFORT`) to the processes it starts,
 which would silently override them.
 
+## LangSmith tracing
+
+Defined in `TracingSettings` ([`observability.py`](../src/app/observability.py)).
+Off by default. When enabled, the API exports these settings at startup, so
+values in `.env` work even though pydantic settings do not export them.
+LangSmith's free single-user plan includes a monthly trace allowance; check
+its current limits. Each chat turn produces one trace.
+
+| Variable | Default | Description |
+|---|---|---|
+| `LANGSMITH_TRACING` | `false` | Trace each LangGraph run and every Claude call. Needs `LANGSMITH_API_KEY`; without it tracing stays off |
+| `LANGSMITH_API_KEY` | none | Key from smith.langchain.com. Secret: never commit it |
+| `LANGSMITH_PROJECT` | `kubesage` | Project the traces are grouped under |
+| `LANGSMITH_TRACING_SAMPLING_RATE` | `1.0` | Fraction of runs traced (0–1); lower it to stay within the free allowance |
+| `LANGSMITH_HIDE_INPUTS` / `LANGSMITH_HIDE_OUTPUTS` | `false` | Keep user messages, prompts, issue text and answers out of LangSmith, sending only structure, timings and metadata |
+| `LANGSMITH_ENDPOINT` | LangSmith default | Only for another region or a self-hosted LangSmith |
+
+A trace shows every workflow node with its state changes. Each Claude call
+appears as an `llm` run named after its output model (for example
+`QueryUnderstanding` or `ComposedReply`), with the system prompt, the JSON
+payload, the output and metadata for the model, effort, backend and attempt
+number, so a rejected response and its retry appear as two runs.
+
+Traces send user messages, prompts and retrieved issue text to LangSmith's
+cloud. Enable tracing only for development and evaluation, or set both HIDE
+variables, in deployments where that data must stay inside the cluster.
+
 ## Neo4j
 
 Defined in `GraphSettings` ([`loader.py`](../src/app/graph/loader.py)).

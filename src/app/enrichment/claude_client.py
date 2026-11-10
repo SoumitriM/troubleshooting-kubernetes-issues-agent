@@ -7,6 +7,7 @@ from typing import Any, Literal, TypeVar
 
 import anthropic
 from anthropic import transform_schema
+from langsmith import traceable
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -158,6 +159,26 @@ class CypherGenerationOutput(BaseModel):
     cypher: str = Field(min_length=1)
     parameters: list[CypherParameter] = Field(default_factory=list)
     explanation: str = Field(min_length=1, max_length=500)
+
+
+def _trace_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    """Show a model call in LangSmith as its prompt and JSON payload."""
+
+    content = inputs.get("content", "")
+    try:
+        payload: Any = json.loads(content)
+    except (TypeError, ValueError):
+        payload = content
+    return {"system": inputs.get("system"), "payload": payload}
+
+
+def _trace_outputs(output: Any) -> dict[str, Any]:
+    stop_reason, text = output if isinstance(output, tuple) else (None, output)
+    try:
+        parsed: Any = json.loads(text) if text else text
+    except (TypeError, ValueError):
+        parsed = text
+    return {"stop_reason": stop_reason, "output": parsed}
 
 
 def ungrounded_suggestion_reason(
@@ -570,7 +591,22 @@ class ClaudeClient:
                     + feedback
                     + "\nReturn a corrected response."
                 )
-            stop_reason, text = self._complete(system, content, output_format)
+            stop_reason, text = self._complete(
+                system,
+                content,
+                output_format,
+                # Ignored unless LangSmith tracing is enabled.
+                langsmith_extra={
+                    "name": output_model.__name__,
+                    "metadata": {
+                        "ls_provider": "anthropic",
+                        "ls_model_name": self._model,
+                        "effort": self._effort,
+                        "backend": self._backend,
+                        "attempt": _attempt + 1,
+                    },
+                },
+            )
             if stop_reason == "refusal":
                 raise EnrichmentResponseError("model declined the request")
             if stop_reason == "max_tokens":
@@ -603,6 +639,12 @@ class ClaudeClient:
             return result
         raise EnrichmentResponseError(failure_reason)
 
+    @traceable(
+        run_type="llm",
+        name="claude",
+        process_inputs=_trace_inputs,
+        process_outputs=_trace_outputs,
+    )
     def _complete(
         self, system: str, content: str, output_format: dict[str, Any]
     ) -> tuple[str | None, str]:

@@ -22,6 +22,7 @@ from app.api.knowledge import router as knowledge_router
 from app.chat.store import ConversationStore
 from app.enrichment.claude_client import ClaudeClient, ClaudeSettings
 from app.graph.loader import GraphSettings
+from app.observability import configure_tracing
 from app.graph.analytics import GraphAnalyticsRepository
 from app.retrieval.embeddings import IssueEmbedder
 from app.retrieval.graph_retriever import GraphRetriever
@@ -97,6 +98,10 @@ def create_app(
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        if resource_factory is None:
+            # Only the real service exports tracing settings; tests inject
+            # resources and must never send traces.
+            configure_tracing()
         application.state.incident_workflow = None
         application.state.neo4j_driver = None
         application.state.incident_checkpointer = None
