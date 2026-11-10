@@ -36,12 +36,21 @@ class ConversationStore:
                 intent TEXT,
                 route TEXT,
                 citations TEXT NOT NULL DEFAULT '[]',
+                suggestions TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS chat_messages_conversation
                 ON chat_messages (conversation_id, id);
             """
         )
+        cursor = await self._connection.execute("PRAGMA table_info(chat_messages)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "suggestions" not in columns:
+            # Databases created before follow-up suggestions existed.
+            await self._connection.execute(
+                "ALTER TABLE chat_messages "
+                "ADD COLUMN suggestions TEXT NOT NULL DEFAULT '[]'"
+            )
         await self._connection.commit()
 
     async def create(self, conversation_id: str, first_message: str) -> None:
@@ -76,7 +85,7 @@ class ConversationStore:
     async def messages(self, conversation_id: str) -> list[dict[str, Any]]:
         cursor = await self._connection.execute(
             "SELECT role, content, thread_id, status, intent, route, citations, "
-            "created_at FROM chat_messages WHERE conversation_id = ? ORDER BY id",
+            "created_at, suggestions FROM chat_messages WHERE conversation_id = ? ORDER BY id",
             (conversation_id,),
         )
         return [
@@ -89,6 +98,7 @@ class ConversationStore:
                 "route": row[5],
                 "citations": json.loads(row[6]),
                 "created_at": row[7],
+                "suggestions": json.loads(row[8]),
             }
             for row in await cursor.fetchall()
         ]
@@ -104,12 +114,13 @@ class ConversationStore:
         intent: str | None = None,
         route: str | None = None,
         citations: list[str] | None = None,
+        suggestions: list[str] | None = None,
     ) -> dict[str, Any]:
         now = _now()
         await self._connection.execute(
             "INSERT INTO chat_messages (conversation_id, role, content, thread_id, "
-            "status, intent, route, citations, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "status, intent, route, citations, suggestions, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 conversation_id,
                 role,
@@ -119,6 +130,7 @@ class ConversationStore:
                 intent,
                 route,
                 json.dumps(citations or []),
+                json.dumps(suggestions or []),
                 now,
             ),
         )
@@ -135,6 +147,7 @@ class ConversationStore:
             "intent": intent,
             "route": route,
             "citations": citations or [],
+            "suggestions": suggestions or [],
             "created_at": now,
         }
 

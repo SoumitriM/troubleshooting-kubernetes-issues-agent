@@ -117,5 +117,6 @@ def _public_result(
             "route": result.get("route"),
             "answer": result.get("answer"),
             "citations": result.get("citations", []),
+            "suggestions": result.get("suggestions", []),
         }
     )

@@ -64,6 +64,8 @@ class IncidentClarificationResponse(BaseModel):
     question: str
     known_details: dict[str, Any]
     missing_details: list[str]
+    citations: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
 
 
 class IncidentCompletedResponse(BaseModel):
@@ -74,6 +76,7 @@ class IncidentCompletedResponse(BaseModel):
     route: Route
     answer: str
     citations: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
 
 
 IncidentConversationResponse = (
@@ -94,6 +97,7 @@ class KnowledgeQueryResponse(BaseModel):
     route: Route
     answer: str
     citations: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
 
 
 class ChatRequest(BaseModel):
@@ -131,6 +135,7 @@ class ChatMessage(BaseModel):
     intent: Intent | None = None
     route: Route | None = None
     citations: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
     created_at: str
 
 

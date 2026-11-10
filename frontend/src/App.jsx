@@ -70,7 +70,7 @@ function storeConversation(conversationId) {
   }
 }
 
-function AssistantMessage({ message }) {
+function AssistantMessage({ message, onSuggest }) {
   const needsDetails = message.status === "needs_clarification";
   return (
     <article className={`message assistant${needsDetails ? " clarify" : ""}`}>
@@ -80,7 +80,7 @@ function AssistantMessage({ message }) {
           <span className="intent-pill">{INTENT_LABELS[message.intent] || message.intent}</span>
         )}
         <FormattedAnswer text={message.content} />
-        {needsDetails && <p className="reply-hint">Reply below with these details to continue.</p>}
+        {needsDetails && !onSuggest && <p className="reply-hint">Reply below to continue.</p>}
         {message.citations?.length > 0 && (
           <div className="sources">
             <span>Sources</span>
@@ -91,6 +91,15 @@ function AssistantMessage({ message }) {
                 </a>
               ))}
             </div>
+          </div>
+        )}
+        {onSuggest && message.suggestions?.length > 0 && (
+          <div className="suggestions" aria-label="Suggested replies">
+            {message.suggestions.map((suggestion) => (
+              <button key={suggestion} type="button" onClick={() => onSuggest(suggestion)}>
+                {suggestion}
+              </button>
+            ))}
           </div>
         )}
       </div>
@@ -270,7 +279,12 @@ function App() {
                 message.role === "user" ? (
                   <div key={index} className="message user"><div className="bubble">{message.content}</div></div>
                 ) : (
-                  <AssistantMessage key={index} message={message} />
+                  <AssistantMessage
+                    key={index}
+                    message={message}
+                    // Only the latest reply offers suggestions; older ones are stale.
+                    onSuggest={index === messages.length - 1 && !sending ? send : null}
+                  />
                 ),
               )}
               {sending && (
@@ -301,7 +315,7 @@ function App() {
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={onKeyDown}
               placeholder={awaitingDetails
-                ? "Add the error, component, version, or logs…"
+                ? "Type your answer…"
                 : messages.length
                   ? "Ask a follow-up…"
                   : "Describe an incident or ask about Kubernetes…"}

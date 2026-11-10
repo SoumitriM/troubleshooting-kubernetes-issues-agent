@@ -77,6 +77,11 @@ def score(response: dict[str, Any], expect: dict[str, Any]) -> list[str]:
         failures.append(f"{len(citations)} citations, expected >= {expect['min_citations']}")
     if "max_citations" in expect and len(citations) > expect["max_citations"]:
         failures.append(f"{len(citations)} citations, expected <= {expect['max_citations']}")
+    suggestions = response.get("suggestions") or []
+    if len(suggestions) < expect.get("min_suggestions", 0):
+        failures.append(
+            f"{len(suggestions)} suggestions, expected >= {expect['min_suggestions']}"
+        )
     return failures
 
 

@@ -19,6 +19,7 @@ def build_workflow(
     graph.add_node("assess_evidence", nodes.assess_evidence)
     graph.add_node("generate_fix", nodes.generate_fix)
     graph.add_node("generate_findings", nodes.generate_findings)
+    graph.add_node("prepare_clarification", nodes.prepare_clarification)
     graph.add_node("request_clarification", nodes.request_clarification)
     graph.add_node("generate_cypher", nodes.generate_cypher)
     graph.add_node("validate_cypher", nodes.validate_cypher)
@@ -39,7 +40,7 @@ def build_workflow(
             "INCIDENT_TROUBLESHOOTING": "analyze_incident",
             "GRAPH_ANALYTICS": "generate_cypher",
             "GENERAL_KUBERNETES_QUESTION": "retrieve_kubernetes_docs",
-            "NEEDS_CLARIFICATION": "request_clarification",
+            "NEEDS_CLARIFICATION": "prepare_clarification",
             "RESEARCH": "research",
         },
     )
@@ -51,7 +52,7 @@ def build_workflow(
             "INCIDENT_TROUBLESHOOTING": "analyze_incident",
             "GRAPH_ANALYTICS": "generate_cypher",
             "GENERAL_KUBERNETES_QUESTION": "retrieve_kubernetes_docs",
-            "NEEDS_CLARIFICATION": "request_clarification",
+            "NEEDS_CLARIFICATION": "prepare_clarification",
         },
     )
     graph.add_conditional_edges(
@@ -59,7 +60,7 @@ def build_workflow(
         route_after_analysis,
         {
             "retrieve_evidence": "retrieve_evidence",
-            "request_clarification": "request_clarification",
+            "request_clarification": "prepare_clarification",
         },
     )
     graph.add_edge("retrieve_evidence", "assess_evidence")
@@ -69,7 +70,7 @@ def build_workflow(
         {
             "generate_fix": "generate_fix",
             "generate_findings": "generate_findings",
-            "request_clarification": "request_clarification",
+            "request_clarification": "prepare_clarification",
         },
     )
     graph.add_edge("generate_fix", END)
@@ -94,6 +95,7 @@ def build_workflow(
     graph.add_edge("graph_query_failed", END)
     graph.add_edge("retrieve_kubernetes_docs", "answer_from_kubernetes_docs")
     graph.add_edge("answer_from_kubernetes_docs", END)
+    graph.add_edge("prepare_clarification", "request_clarification")
     graph.add_conditional_edges(
         "request_clarification",
         route_after_clarification,

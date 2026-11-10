@@ -169,8 +169,12 @@ validation twice ends with a request to rephrase.
 ### Clarification
 
 When the API runs with its SQLite checkpointer, `request_clarification`
-pauses the thread with a LangGraph interrupt. The question names what is
-already known and asks only for what is missing. The client resumes with the
+pauses the thread with a LangGraph interrupt. Before it, `prepare_clarification`
+asks Claude for a conversational question: it acknowledges what is already
+known, asks for the one or two missing details that would help most, may
+point to a relevant documentation page or a read-only diagnostic command, and
+offers likely answers as suggestions. If that call fails, the question falls
+back to a list of the missing details. The client resumes with the
 user's answer, and the workflow re-runs `understand_query` on the original
 question plus every answer. After three clarification rounds the thread ends
 and lists what is still missing.
@@ -198,6 +202,15 @@ scope answer instead of a clarification question.
 If the Claude call in `understand_query` fails, the request is not sent to
 clarification. It ends with "The query-understanding service is temporarily
 unavailable", because more detail from the user would not help.
+
+### Conversational replies
+
+Every reply ends with up to three follow-up `suggestions`, shown in the UI as
+buttons under the latest message. Incident, analytics, clarification and
+scope replies get their wording from one `compose_reply` call that may only
+rephrase the evidence the route already gathered; the evidence itself (fix
+steps, issue lists, analytics rows) is appended verbatim. See
+[LLM integration](llm-integration.md#conversational-replies).
 
 ## Safety model
 

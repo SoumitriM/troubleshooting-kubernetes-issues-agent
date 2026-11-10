@@ -14,17 +14,48 @@ System prompts are in [`prompts.py`](../src/app/enrichment/prompts.py).
 | `verify_incident_matches` | Incident route, after reranking | `IncidentMatchVerification` |
 | `research_step` | Research route, once per step (at most five) | `ResearchStep` |
 | `generate_grounded_fix` | Incident route, when a verified fix exists | `GroundedFixAnswer` |
+| `compose_reply` | Clarification, scope, incident and analytics replies (see [Conversational replies](#conversational-replies)) | `ComposedReply` |
 | `enrich` | `app.enrichment.cli` | `IssueEnrichment` |
 | `extract_resolution` | `app.enrichment.resolution_cli` | `IssueResolution` |
 | `normalize_query`, `classify_query` | Nothing; superseded by `analyze_query` | `NormalizedQuery`, `IntentClassification` |
 
-Graph analytics answers do not call Claude:
-[`formatting.py`](../src/app/graph/formatting.py) renders the query rows, so
-they contain only database results.
+The analytics rows themselves are rendered without Claude by
+[`formatting.py`](../src/app/graph/formatting.py), so the list contains only
+database results; `compose_reply` adds a one- or two-sentence takeaway above
+it.
 
-A typical question makes one to three calls: `analyze_query`, then an answer
-call on the documentation and fix routes, plus `verify_incident_matches` on
-the incident route.
+A typical question makes two to four calls: `analyze_query`, an answer call
+(`answer_documentation_question`, or `compose_reply` on the other routes,
+plus `generate_grounded_fix` for a fix), and `verify_incident_matches` on the
+incident route.
+
+## Conversational replies
+
+Routes that used to return fixed templates (clarification, out-of-scope,
+incident findings, verified fixes, analytics) build that template first, then
+ask `compose_reply` to write the reply a person would. The prompt
+(`COMPOSE_REPLY_SYSTEM_PROMPT`, sharing `CONVERSATION_STYLE` with the
+documentation and research prompts) asks for one focused question instead of
+a list of missing details, a short takeaway before any evidence list, and up
+to three `suggestions` that the UI shows as clickable follow-ups.
+
+The composer can only rephrase:
+
+- Evidence stays verbatim. Fix summaries and verified steps, issue lists and
+  analytics rows are appended by code below the composed text.
+- `ungrounded_reply_reason` rejects a reply containing an issue reference,
+  number, version or backticked `code` that is not in the payload, or any URL.
+  Clarifications receive a fixed list of read-only diagnostic commands
+  (`DIAGNOSTIC_COMMANDS` in `nodes.py`), so `journalctl -u kubelet` can be
+  suggested but an invented command cannot.
+- Citations must be URLs from the payload.
+- If the call fails or is rejected twice, the template is used unchanged, so
+  the reply loses tone but never content.
+
+The clarification reply is composed in its own `prepare_clarification` node.
+`request_clarification` pauses with `interrupt()`, and LangGraph re-runs an
+interrupted node from the start on resume, so a model call inside it would run
+twice.
 
 ## Request flow
 
@@ -54,6 +85,7 @@ exactly as stored.
 | Method | The reply is rejected if |
 |---|---|
 | `generate_grounded_fix` | The summary is not one of the supplied resolution summaries, or any step or citation was not supplied |
+| `compose_reply` | The reply has a URL, or an issue number, number, version or code span absent from the payload, or a citation was not supplied |
 | `answer_documentation_question` | A citation is not the source URL of a retrieved chunk |
 | `extract_resolution` | An evidence URL does not appear in the issue's comments, PRs or commits |
 | `generate_cypher` | Parameter names repeat. The Cypher itself is then checked by `CypherValidator` |

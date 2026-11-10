@@ -34,19 +34,22 @@ Response:
   "conversation_id": "8811f3ba6add40cb8f21312c0d1a59f1",
   "message": {
     "role": "assistant",
-    "content": "Graph results:\n- {\"total_issues\": 2}",
+    "content": "kubelet has the most reported issues in v1.35, with 3.\n\nFound 3 results:\n- kubelet: 3 issues\n…",
     "status": "completed",
     "intent": "GRAPH_ANALYTICS",
     "route": "answer_from_graph",
     "citations": [],
+    "suggestions": ["Show me the kubelet issues", "Which versions have the most issues?"],
     "created_at": "2026-11-03T11:31:37.439+00:00"
   }
 }
 ```
 
-`status`, `intent`, `route` and `citations` have the same values as in the
-knowledge endpoints below. When `status` is `needs_clarification`, the next
-message in the conversation is treated as the answer to that question.
+`status`, `intent`, `route`, `citations` and `suggestions` have the same
+values as in the knowledge endpoints below. When `status` is
+`needs_clarification`, the next message in the conversation is treated as the
+answer to that question; its `suggestions` are likely answers the UI offers as
+buttons.
 
 ### Conversation history
 
@@ -91,7 +94,8 @@ Response:
 | `intent` | `GENERAL_KUBERNETES_QUESTION`, `GRAPH_ANALYTICS`, `INCIDENT_TROUBLESHOOTING`, `NEEDS_CLARIFICATION` |
 | `route` | `general_answer`, `answer_from_graph`, `generate_fix`, `generate_findings`, `request_clarification`, `research_answer` (multi-source) |
 | `answer` | Plain text with `-` bullet lists; for `needs_clarification`, the question to ask |
-| `citations` | Source URLs used by the answer; empty for analytics and clarification |
+| `citations` | Source URLs used by the answer; empty for analytics, and for clarification unless it points to a documentation page |
+| `suggestions` | Up to three short follow-ups (or, for a clarification, likely answers) written as the user would type them; empty when the reply composer is unavailable |
 
 ### `POST /api/knowledge/{thread_id}/resume`
 
@@ -132,9 +136,11 @@ A clarification response includes structured detail:
 {
   "thread_id": "…",
   "status": "needs_clarification",
-  "question": "I already have component kubelet. Please provide: …",
+  "question": "Sorry, a kubelet that crashes right after an upgrade is no fun. What's the exact error it logs before it dies? `journalctl -u kubelet` should show it.",
   "known_details": {"components": ["kubelet"]},
-  "missing_details": ["exact error message or error code", "relevant logs"]
+  "missing_details": ["exact error message or error code", "relevant logs"],
+  "citations": [],
+  "suggestions": ["Here's the error from journalctl", "Only the kubelet was upgraded"]
 }
 ```
 

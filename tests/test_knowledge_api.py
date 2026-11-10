@@ -34,6 +34,7 @@ def test_knowledge_endpoint_exposes_intent_and_safe_result() -> None:
         "route": "general_answer",
         "answer": "Documentation retrieval is not configured.",
         "citations": [],
+        "suggestions": [],
     }
 
 

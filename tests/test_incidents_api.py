@@ -45,6 +45,7 @@ def test_analyze_incident_reuses_workflow_and_returns_safe_projection() -> None:
         "route": "request_clarification",
         "answer": "Please provide pod events.",
         "citations": [],
+        "suggestions": [],
     }
     assert second.status_code == 200
     assert resource_factory.call_count == 1

@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import subprocess
 from collections.abc import Callable
 from typing import Any, Literal, TypeVar
@@ -10,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.agent.state import (
+    ComposedReply,
     CypherGeneration,
     GroundedFixAnswer,
     IncidentMatchVerification,
@@ -21,6 +23,7 @@ from app.agent.state import (
 from app.documentation.models import GroundedDocumentationAnswer
 from app.enrichment.models import IssueEnrichment
 from app.enrichment.prompts import (
+    COMPOSE_REPLY_SYSTEM_PROMPT,
     CYPHER_SYSTEM_PROMPT,
     DOCUMENTATION_ANSWER_SYSTEM_PROMPT,
     FIX_ANSWER_SYSTEM_PROMPT,
@@ -43,6 +46,52 @@ REFUSAL_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_OUTPUT_TOKENS = 16000
 
 OutputT = TypeVar("OutputT", bound=BaseModel)
+
+ReplySituation = Literal[
+    "clarify",
+    "incident_findings",
+    "incident_fix",
+    "analytics",
+    "analytics_empty",
+    "graph_failed",
+    "out_of_scope",
+]
+
+_URL = re.compile(r"https?://\S+")
+_CODE_SPAN = re.compile(r"`([^`]+)`")
+_ISSUE_REF = re.compile(r"#(\d+)")
+_NUMBER = re.compile(r"\d+(?:[.,:]\d+)*")
+
+
+def ungrounded_reply_reason(reply: str, supplied_text: str) -> str | None:
+    """Name the first detail in ``reply`` that the payload does not contain.
+
+    A conversational reply may rephrase evidence, so whole sentences cannot be
+    matched. The details a reader would act on can be: issue references, code
+    spans (commands, flags, error text), numbers and versions, and links.
+    """
+
+    if _URL.search(reply):
+        return "put URLs in citations, not in the reply"
+    numbers = set(_NUMBER.findall(supplied_text))
+
+    def supplied(number: str) -> bool:
+        # "1.36" may summarise a supplied "v1.36.2"; "14" must not pass
+        # because "141382" was supplied.
+        return number in numbers or any(
+            token.startswith(number + ".") for token in numbers
+        )
+
+    for reference in _ISSUE_REF.findall(reply):
+        if reference not in numbers:
+            return f"issue #{reference} was not supplied"
+    for span in _CODE_SPAN.findall(reply):
+        if span.strip() not in supplied_text:
+            return f"code `{span}` does not appear in the payload"
+    for number in _NUMBER.findall(_CODE_SPAN.sub(" ", reply)):
+        if not supplied(number.rstrip(".,:")):
+            return f"the number {number} does not appear in the payload"
+    return None
 
 
 class ClaudeSettings(BaseSettings):
@@ -241,6 +290,35 @@ class ClaudeClient:
             },
             ResearchStep,
             check,
+        )
+
+    def compose_reply(
+        self,
+        situation: ReplySituation,
+        *,
+        user_message: str,
+        facts: dict[str, Any],
+        history: list[dict[str, str]] | None = None,
+    ) -> ComposedReply:
+        """Write a natural reply around evidence a route already gathered."""
+
+        payload: dict[str, Any] = {
+            "situation": situation,
+            "user_message": user_message,
+            "facts": facts,
+        }
+        if history:
+            payload["conversation_history"] = history
+        supplied_text = json.dumps(payload, ensure_ascii=False)
+        allowed_urls = self._collect_supplied_urls(facts)
+
+        def check(output: ComposedReply) -> str | None:
+            if not set(output.citations).issubset(allowed_urls):
+                return "response contains unsupported citation"
+            return ungrounded_reply_reason(output.reply, supplied_text)
+
+        return self._structured(
+            COMPOSE_REPLY_SYSTEM_PROMPT, payload, ComposedReply, check
         )
 
     def normalize_query(self, query: str) -> NormalizedQuery:

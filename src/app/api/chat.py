@@ -138,12 +138,14 @@ async def _run_turn(
 def _assistant_fields(result: dict[str, Any]) -> dict[str, Any]:
     interruptions = result.get("__interrupt__") or ()
     if interruptions:
+        value = interruptions[0].value
         return {
-            "content": interruptions[0].value["question"],
+            "content": value["question"],
             "status": "needs_clarification",
             "intent": result.get("intent", "NEEDS_CLARIFICATION"),
             "route": "request_clarification",
-            "citations": [],
+            "citations": value.get("citations", []),
+            "suggestions": value.get("suggestions", []),
         }
     return {
         "content": result["answer"],
@@ -151,6 +153,7 @@ def _assistant_fields(result: dict[str, Any]) -> dict[str, Any]:
         "intent": result.get("intent"),
         "route": result.get("route"),
         "citations": result.get("citations", []),
+        "suggestions": result.get("suggestions", []),
     }
 
 
@@ -162,6 +165,7 @@ def _public_message(message: dict[str, Any]) -> ChatMessage:
         intent=message.get("intent"),
         route=message.get("route"),
         citations=message.get("citations", []),
+        suggestions=message.get("suggestions", []),
         created_at=message["created_at"],
     )
 

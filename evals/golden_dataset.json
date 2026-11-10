@@ -16,7 +16,8 @@
           "kubelet"
         ],
         "citations_prefix": "https://kubernetes.io/docs/",
-        "min_citations": 1
+        "min_citations": 1,
+        "min_suggestions": 1
       }
     },
     {
@@ -135,7 +136,8 @@
         "answer_contains": [
           "kubelet: 13 issues"
         ],
-        "max_citations": 0
+        "max_citations": 0,
+        "min_suggestions": 1
       }
     },
     {
@@ -390,9 +392,13 @@
         "status": "needs_clarification",
         "route": "request_clarification",
         "answer_contains": [
+          "?"
+        ],
+        "max_citations": 0,
+        "answer_not_contains": [
           "Please provide"
         ],
-        "max_citations": 0
+        "min_suggestions": 1
       }
     },
     {
@@ -497,8 +503,9 @@
           "Please provide"
         ],
         "answer_contains": [
-          "only help with Kubernetes"
-        ]
+          "Kubernetes"
+        ],
+        "min_suggestions": 1
       }
     },
     {

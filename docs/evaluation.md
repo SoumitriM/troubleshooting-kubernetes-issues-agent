@@ -113,6 +113,7 @@ clarification, and the runner answers it before checking expectations.
 | `citations_contain` | Each string appears in at least one citation |
 | `citations_prefix` | Every citation starts with this prefix |
 | `min_citations` / `max_citations` | The citation count is within bounds |
+| `min_suggestions` | The response offers at least this many follow-up suggestions |
 | `graph_unchanged` | The Neo4j `Issue` count is the same before and after the request |
 
 ## Interpreting failures

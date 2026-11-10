@@ -1,0 +1,221 @@
+import asyncio
+from typing import Any
+from unittest.mock import MagicMock
+
+import aiosqlite
+import pytest
+from fastapi.testclient import TestClient
+from langgraph.checkpoint.memory import InMemorySaver
+
+from app.agent.checkpointing import strict_checkpoint_serializer
+from app.agent.nodes import AgentSettings, IncidentNodes
+from app.agent.state import ComposedReply
+from app.agent.workflow import build_workflow
+from app.chat.store import ConversationStore
+from app.enrichment.claude_client import EnrichmentResponseError, ungrounded_reply_reason
+from app.main import AgentResources, create_app
+from tests.test_chat_api import GC_REPORT, MemoryLLM
+from tests.test_claude_client import client, response
+from tests.test_incident_conversation import ConversationRetriever
+
+
+SUPPLIED = (
+    '{"facts": {"issue_number": 141382, "count": 13, "version": "v1.36.2", '
+    '"diagnostic_commands": ["journalctl -u kubelet"]}}'
+)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "This looks like #141382 on 1.36, with 13 reports.",
+        "Could you share the output of `journalctl -u kubelet`?",
+        "Which version are you on: v1.36.2?",
+    ],
+)
+def test_grounded_reply_details_pass(reply: str) -> None:
+    assert ungrounded_reply_reason(reply, SUPPLIED) is None
+
+
+@pytest.mark.parametrize(
+    ("reply", "reason"),
+    [
+        ("It has 14 reports.", "the number 14"),
+        ("See #1413 for details.", "issue #1413"),
+        ("Try `kubectl drain node-1`.", "code `kubectl drain node-1`"),
+        ("See https://example.com/fix.", "URLs in citations"),
+    ],
+)
+def test_invented_reply_details_are_rejected(reply: str, reason: str) -> None:
+    assert reason in (ungrounded_reply_reason(reply, SUPPLIED) or "")
+
+
+def test_compose_reply_retries_an_invented_number_then_succeeds() -> None:
+    url = "https://github.com/kubernetes/kubernetes/issues/141382"
+    claude, api = client(
+        response('{"reply":"Kubelet has 99 reports.","citations":[],"suggestions":[]}'),
+        response(
+            '{"reply":"This looks like #141382.","citations":["' + url + '"],'
+            '"suggestions":["Which versions does this affect?"]}'
+        ),
+    )
+
+    composed = claude.compose_reply(
+        "incident_findings",
+        user_message="gc loops",
+        facts={"direct_matches": [{"issue_number": 141382, "url": url}]},
+    )
+
+    assert composed.reply == "This looks like #141382."
+    assert composed.citations == [url]
+    assert composed.suggestions == ["Which versions does this affect?"]
+    retry_system = api.beta.messages.create.call_args_list[1].kwargs["system"]
+    assert "the number 99 does not appear" in retry_system
+
+
+def test_compose_reply_rejects_a_citation_that_was_not_supplied() -> None:
+    bad = '{"reply":"Here you go.","citations":["https://evil.example"],"suggestions":[]}'
+    claude, _api = client(response(bad), response(bad))
+
+    with pytest.raises(EnrichmentResponseError, match="unsupported citation"):
+        claude.compose_reply("analytics", user_message="q", facts={"rows": []})
+
+
+def test_suggestions_are_trimmed_deduplicated_and_capped() -> None:
+    composed = ComposedReply(
+        reply="ok",
+        suggestions=["  Show  kubelet issues ", "show kubelet issues", "a", "b", "c"],
+    )
+    assert composed.suggestions == ["Show kubelet issues", "a", "b"]
+    with pytest.raises(ValueError):
+        ComposedReply(reply="ok", suggestions=["see https://x.y"])
+
+
+class ComposingLLM(MemoryLLM):
+    def __init__(self, fail: bool = False) -> None:
+        super().__init__()
+        self.fail = fail
+        self.compose_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def compose_reply(
+        self,
+        situation: str,
+        *,
+        user_message: str,
+        facts: dict[str, Any],
+        history: list[dict[str, str]] | None = None,
+    ) -> ComposedReply:
+        self.compose_calls.append((situation, facts))
+        if self.fail:
+            raise EnrichmentResponseError("model declined the request")
+        if situation == "clarify":
+            return ComposedReply(
+                reply="Sorry the kubelet is acting up. What error do you see?",
+                suggestions=["Pods are stuck in Pending", "It's CrashLoopBackOff"],
+            )
+        return ComposedReply(
+            reply="This looks like #141382, but no fix is confirmed yet.",
+            suggestions=["Which versions does this affect?"],
+        )
+
+
+def composing_app(llm: ComposingLLM) -> Any:
+    workflow = build_workflow(
+        IncidentNodes(
+            llm,  # type: ignore[arg-type]
+            ConversationRetriever(),  # type: ignore[arg-type]
+            AgentSettings(_env_file=None),
+            enable_interrupts=True,
+        ),
+        checkpointer=InMemorySaver(serde=strict_checkpoint_serializer()),
+    )
+    return create_app(lambda: AgentResources(workflow=workflow, driver=MagicMock()))
+
+
+def test_chat_clarifies_conversationally_and_offers_suggestions() -> None:
+    llm = ComposingLLM()
+    with TestClient(composing_app(llm)) as http:
+        first = http.post("/api/chat", json={"message": "kubelet is not working"}).json()
+        second = http.post(
+            "/api/chat",
+            json={"message": GC_REPORT, "conversation_id": first["conversation_id"]},
+        ).json()
+        stored = http.get(
+            f"/api/chat/conversations/{first['conversation_id']}"
+        ).json()
+
+    question = first["message"]
+    assert question["status"] == "needs_clarification"
+    assert question["content"] == (
+        "Sorry the kubelet is acting up. What error do you see?"
+    )
+    assert "Please provide" not in question["content"]
+    assert question["suggestions"] == ["Pods are stuck in Pending", "It's CrashLoopBackOff"]
+
+    answer = second["message"]
+    assert answer["route"] == "generate_findings"
+    assert answer["content"].startswith("This looks like #141382")
+    assert "**Closest reported issues:**" in answer["content"]
+    assert answer["suggestions"] == ["Which versions does this affect?"]
+    assert answer["citations"] == [
+        "https://github.com/kubernetes/kubernetes/issues/141382"
+    ]
+
+    # The clarification is composed once; resuming does not re-run the composer.
+    assert [situation for situation, _ in llm.compose_calls] == [
+        "clarify",
+        "incident_findings",
+    ]
+    clarify_facts = llm.compose_calls[0][1]
+    assert clarify_facts["known_details"]["components"] == ["kubelet"]
+    assert "kubectl version" in clarify_facts["diagnostic_commands"]
+    assert [message["suggestions"] for message in stored["messages"]] == [
+        [],
+        question["suggestions"],
+        [],
+        answer["suggestions"],
+    ]
+
+
+def test_composer_failure_falls_back_to_the_template() -> None:
+    llm = ComposingLLM(fail=True)
+    with TestClient(composing_app(llm)) as http:
+        message = http.post(
+            "/api/chat", json={"message": "kubelet is not working"}
+        ).json()["message"]
+
+    assert message["status"] == "needs_clarification"
+    assert "Please provide" in message["content"]
+    assert message["suggestions"] == []
+
+
+def test_store_setup_adds_suggestions_to_an_existing_database(tmp_path) -> None:
+    async def scenario() -> list[dict[str, Any]]:
+        path = tmp_path / "conversations.sqlite"
+        async with aiosqlite.connect(path) as connection:
+            await connection.executescript(
+                """
+                CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE chat_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT NOT NULL, role TEXT NOT NULL,
+                    content TEXT NOT NULL, thread_id TEXT, status TEXT,
+                    intent TEXT, route TEXT,
+                    citations TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL);
+                INSERT INTO conversations VALUES ('c1', 't', 'now', 'now');
+                INSERT INTO chat_messages (conversation_id, role, content, created_at)
+                    VALUES ('c1', 'user', 'old message', 'now');
+                """
+            )
+            await connection.commit()
+        async with aiosqlite.connect(path) as connection:
+            store = ConversationStore(connection)
+            await store.setup()
+            await store.setup()  # idempotent
+            await store.append("c1", "assistant", "hi", suggestions=["Next?"])
+            return await store.messages("c1")
+
+    messages = asyncio.run(scenario())
+    assert [message["suggestions"] for message in messages] == [[], ["Next?"]]

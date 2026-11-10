@@ -49,15 +49,7 @@ async def query_knowledge(
         )
         interruptions = result.get("__interrupt__") or ()
         if interruptions:
-            question = interruptions[0].value["question"]
-            return KnowledgeQueryResponse(
-                thread_id=thread_id,
-                status="needs_clarification",
-                intent=result.get("intent", "NEEDS_CLARIFICATION"),
-                route="request_clarification",
-                answer=question,
-                citations=[],
-            )
+            return _clarification_response(thread_id, result)
         return KnowledgeQueryResponse(
             thread_id=thread_id,
             status="completed",
@@ -65,6 +57,7 @@ async def query_knowledge(
             route=result["route"],
             answer=result["answer"],
             citations=result.get("citations", []),
+            suggestions=result.get("suggestions", []),
         )
     except HTTPException:
         raise
@@ -103,14 +96,7 @@ async def resume_knowledge(
         )
         interruptions = result.get("__interrupt__") or ()
         if interruptions:
-            return KnowledgeQueryResponse(
-                thread_id=thread_id,
-                status="needs_clarification",
-                intent=result.get("intent", "NEEDS_CLARIFICATION"),
-                route="request_clarification",
-                answer=interruptions[0].value["question"],
-                citations=[],
-            )
+            return _clarification_response(thread_id, result)
         return KnowledgeQueryResponse(
             thread_id=thread_id,
             status="completed",
@@ -118,6 +104,7 @@ async def resume_knowledge(
             route=result["route"],
             answer=result["answer"],
             citations=result.get("citations", []),
+            suggestions=result.get("suggestions", []),
         )
     except HTTPException:
         raise
@@ -127,3 +114,18 @@ async def resume_knowledge(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Kubernetes knowledge service is temporarily unavailable",
         ) from None
+
+
+def _clarification_response(
+    thread_id: str, result: dict[str, Any]
+) -> KnowledgeQueryResponse:
+    value = result["__interrupt__"][0].value
+    return KnowledgeQueryResponse(
+        thread_id=thread_id,
+        status="needs_clarification",
+        intent=result.get("intent", "NEEDS_CLARIFICATION"),
+        route="request_clarification",
+        answer=value["question"],
+        citations=value.get("citations", []),
+        suggestions=value.get("suggestions", []),
+    )

@@ -8,6 +8,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.agent.state import (
+    ComposedReply,
     CypherGeneration,
     IncidentState,
     NormalizedQuery,
@@ -30,6 +31,21 @@ LOGGER = logging.getLogger(__name__)
 # same component with or without its "kube-" binary prefix.
 COMPONENT_KEY = "replace(toLower(c.name), 'kube-', '')"
 
+# Read-only commands the clarification reply may ask the user to run. The
+# composer may quote only commands that appear in its payload.
+DIAGNOSTIC_COMMANDS = [
+    "kubectl get pods -A",
+    "kubectl describe pod <pod-name>",
+    "kubectl logs <pod-name> --previous",
+    "kubectl get events --sort-by=.lastTimestamp",
+    "kubectl get nodes",
+    "kubectl version",
+    "journalctl -u kubelet",
+]
+# Facts sent to the composer are trimmed so one reply stays a cheap call.
+COMPOSE_MAX_ROWS = 25
+COMPOSE_TEXT_CHARS = 600
+
 
 class AgentSettings(BaseSettings):
     """Deterministic routing thresholds loaded from environment or .env."""
@@ -39,6 +55,15 @@ class AgentSettings(BaseSettings):
     agent_relevance_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
     agent_actionable_fix_threshold: float = Field(default=0.65, ge=0.0, le=1.0)
     documentation_index_path: Path = Path("data/kubernetes_docs.sqlite")
+
+
+OUT_OF_SCOPE_ANSWER = (
+    "I can only help with Kubernetes: troubleshooting incidents, "
+    "questions about reported issues in the knowledge graph, and "
+    "how Kubernetes works. I answer from read-only evidence and "
+    "cannot change data or run commands. Please ask a "
+    "Kubernetes question."
+)
 
 
 class IncidentNodes:
@@ -131,6 +156,54 @@ class IncidentNodes:
             "missing_details": missing_details,
             "cypher_attempt_count": 0,
             "cypher_validation_errors": [],
+            "suggestions": [],
+            "clarification_question": "",
+        }
+
+    def _converse(
+        self, state: IncidentState, situation: str, facts: dict[str, Any]
+    ) -> ComposedReply | None:
+        """Ask the model for a conversational reply; ``None`` keeps the template.
+
+        Routes build their deterministic answer first, so a failed or missing
+        composer only costs tone, never content.
+        """
+
+        composer = getattr(self._llm, "compose_reply", None)
+        if composer is None or state.get("query_understanding_unavailable"):
+            return None
+        original = state.get("original_query") or state.get("user_query", "")
+        user_message = "\n".join(
+            [original, *state.get("clarification_history", [])]
+        )
+        try:
+            composed = composer(
+                situation,
+                user_message=user_message,
+                facts=facts,
+                history=state.get("conversation_history") or None,
+            )
+        except Exception:
+            LOGGER.warning("Reply composer unavailable for situation=%s", situation)
+            return None
+        return composed if isinstance(composed, ComposedReply) else None
+
+    @staticmethod
+    def _issue_facts(issue: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: (
+                value[:COMPOSE_TEXT_CHARS] if isinstance(value, str) else value
+            )
+            for key, value in {
+                "issue_number": issue.get("issue_number"),
+                "title": issue.get("title"),
+                "summary": issue.get("summary"),
+                "symptom": issue.get("symptom"),
+                "components": (issue.get("components") or [])[:6],
+                "kubernetes_versions": (issue.get("kubernetes_versions") or [])[:4],
+                "state": issue.get("state"),
+            }.items()
+            if value
         }
 
     def generate_cypher(self, state: IncidentState) -> dict[str, Any]:
@@ -277,15 +350,36 @@ class IncidentNodes:
                 display_limit=state.get("graph_display_limit"),
                 probed=bool(state.get("graph_limit_probed")),
             )
-            if state.get("alternative_attempted"):
+            broadened = bool(state.get("alternative_attempted"))
+            if broadened:
                 answer = (
                     "No reported issues matched the exact names in your question"
                     + (", or a broader search." if not rows else ". A broader search found:\n")
                     + (answer if rows else "")
                 )
+            composed = self._converse(
+                state,
+                "analytics" if rows else "analytics_empty",
+                {
+                    "question": state["normalized_query"],
+                    "rows": rows[:COMPOSE_MAX_ROWS],
+                    "total_rows": len(rows),
+                    "shown_below": answer if rows else None,
+                    "broadened": broadened,
+                },
+            )
+            if composed is not None:
+                answer = composed.reply + ("\n\n" + answer if rows else "")
+                return {
+                    "answer": answer,
+                    "citations": self._unique([*citations, *composed.citations]),
+                    "suggestions": composed.suggestions,
+                    "route": "answer_from_graph",
+                }
         return {
             "answer": answer,
             "citations": citations,
+            "suggestions": [],
             "route": "answer_from_graph",
         }
 
@@ -293,17 +387,21 @@ class IncidentNodes:
         if state.get("alternative_attempted"):
             # The structured query already ran and found nothing; only the
             # broader alternative failed validation.
-            return {
-                "answer": "The knowledge graph returned no matching results.",
-                "citations": [],
-                "route": "answer_from_graph",
-            }
-        return {
-            "answer": (
+            situation = "analytics_empty"
+            answer = "The knowledge graph returned no matching results."
+        else:
+            situation = "graph_failed"
+            answer = (
                 "I could not produce a safe graph query after two attempts. "
                 "Please make the analytics question more specific."
-            ),
+            )
+        composed = self._converse(
+            state, situation, {"question": state.get("normalized_query")}
+        )
+        return {
+            "answer": composed.reply if composed else answer,
             "citations": [],
+            "suggestions": composed.suggestions if composed else [],
             "route": "answer_from_graph",
         }
 
@@ -340,6 +438,7 @@ class IncidentNodes:
                     return {
                         "answer": step.answer,
                         "citations": list(dict.fromkeys(step.citations)),
+                        "suggestions": list(getattr(step, "suggestions", [])),
                         "route": "research_answer",
                         "research_steps": steps,
                     }
@@ -450,6 +549,7 @@ class IncidentNodes:
                 raise ValueError("documentation answer contained unsupported citation")
             answer = generated.answer
             citations = generated.citations
+            suggestions = list(getattr(generated, "suggestions", []))
         except Exception:
             LOGGER.warning(
                 "Documentation answer model unavailable; using extractive answer"
@@ -457,9 +557,11 @@ class IncidentNodes:
             best = chunks[0]
             answer = self._extractive_documentation_answer(best)
             citations = [best["source_url"]]
+            suggestions = []
         return {
             "answer": answer,
             "citations": citations,
+            "suggestions": suggestions,
             "route": "general_answer",
         }
 
@@ -648,9 +750,41 @@ class IncidentNodes:
             verified_steps = fallback["verified_steps"]
             citations = fallback["evidence_urls"]
         steps = "\n".join(f"- {step}" for step in verified_steps)
+        context = state.get("retrieved_context", {})
+        fixed_issues = [
+            {
+                **self._issue_facts(issue),
+                "resolution_summary": (issue.get("actionable_fix") or {}).get(
+                    "resolution_summary"
+                ),
+            }
+            for issue in [
+                *context.get("matched_issues", []),
+                *context.get("related_issues", []),
+            ]
+            if (issue.get("actionable_fix") or {}).get("resolution_summary") == answer
+        ]
+        composed = self._converse(
+            state,
+            "incident_fix",
+            {
+                "matched_issues": fixed_issues,
+                "fix_summary_shown_below": answer,
+                "verified_steps_shown_below": verified_steps,
+            },
+        )
+        if composed is None:
+            return {
+                "answer": f"{answer}\nVerified steps:\n{steps}",
+                "citations": citations,
+                "suggestions": [],
+            }
+        # The summary and steps stay verbatim from the evidence; only the lead
+        # sentence is model-written.
         return {
-            "answer": f"{answer}\nVerified steps:\n{steps}",
-            "citations": citations,
+            "answer": f"{composed.reply}\n\n{answer}\n\n**Verified steps:**\n{steps}",
+            "citations": self._unique([*citations, *composed.citations]),
+            "suggestions": composed.suggestions,
         }
 
     def generate_findings(self, state: IncidentState) -> dict[str, Any]:
@@ -675,7 +809,38 @@ class IncidentNodes:
             for issue in [*matched, *related]
             for url in self._finding_urls(issue)
         )
-        return {"answer": "\n".join(answer_parts), "citations": citations}
+        composed = self._converse(
+            state,
+            "incident_findings",
+            {
+                "known_details": self._known_details(state),
+                "direct_matches": [self._issue_facts(issue) for issue in matched],
+                "related_issues": [self._issue_facts(issue) for issue in related],
+                "verified_fix_available": False,
+            },
+        )
+        if composed is None:
+            return {
+                "answer": "\n".join(answer_parts),
+                "citations": citations,
+                "suggestions": [],
+            }
+        details = [composed.reply]
+        if matched:
+            details.append(
+                "**Closest reported issues:**\n"
+                + "\n".join(self._format_finding(issue) for issue in matched)
+            )
+        if related:
+            details.append(
+                "**Related through the graph** (not direct matches):\n"
+                + "\n".join(self._format_finding(issue) for issue in related)
+            )
+        return {
+            "answer": "\n\n".join(details),
+            "citations": self._unique([*citations, *composed.citations]),
+            "suggestions": composed.suggestions,
+        }
 
     def request_clarification(self, state: IncidentState) -> dict[str, Any]:
         if state.get("query_understanding_unavailable"):
@@ -706,14 +871,9 @@ class IncidentNodes:
             }
         if state.get("out_of_scope"):
             return {
-                "answer": (
-                    "I can only help with Kubernetes: troubleshooting incidents, "
-                    "questions about reported issues in the knowledge graph, and "
-                    "how Kubernetes works. I answer from read-only evidence and "
-                    "cannot change data or run commands. Please ask a "
-                    "Kubernetes question."
-                ),
+                "answer": state.get("clarification_question") or OUT_OF_SCOPE_ANSWER,
                 "citations": [],
+                "suggestions": state.get("suggestions", []),
                 "route": "request_clarification",
                 "route_reason": "query outside the assistant's scope",
                 "actionable_fix_available": False,
@@ -724,6 +884,150 @@ class IncidentNodes:
                 state.get("retrieved_context", {}).get("no_close_match")
             ),
         )
+        question = state.get("clarification_question") or self._template_question(
+            state, missing
+        )
+        citations = list(state.get("citations") or []) if state.get(
+            "clarification_question"
+        ) else []
+        suggestions = list(state.get("suggestions") or [])
+        attempts = state.get("clarification_attempts", 0)
+        if self._enable_interrupts:
+            if attempts >= 3:
+                return {
+                    "answer": (
+                        "I could not collect enough diagnostic detail after three "
+                        "clarification attempts. Still needed: "
+                        + ", ".join(missing)
+                        + "."
+                    ),
+                    "citations": [],
+                    "suggestions": [],
+                    "route": "request_clarification",
+                    "route_reason": "maximum clarification attempts reached",
+                    "actionable_fix_available": False,
+                    "clarification_exhausted": True,
+                }
+            response = interrupt(
+                {
+                    "question": question,
+                    "known_details": self._known_details(state),
+                    "missing_details": missing,
+                    "citations": citations,
+                    "suggestions": suggestions,
+                }
+            )
+            return {
+                "clarification_history": [
+                    *state.get("clarification_history", []),
+                    str(response).strip(),
+                ],
+                "clarification_attempts": attempts + 1,
+                "clarification_exhausted": False,
+                "answer": "",
+                "citations": [],
+                "suggestions": [],
+                "clarification_question": "",
+            }
+        return {
+            "answer": question,
+            "citations": citations,
+            "suggestions": suggestions,
+            "route": "request_clarification",
+            "route_reason": state.get(
+                "route_reason",
+                "incident description lacks sufficient diagnostic detail",
+            ),
+            "actionable_fix_available": False,
+        }
+
+    def prepare_clarification(self, state: IncidentState) -> dict[str, Any]:
+        """Compose the conversational clarification before the interrupt.
+
+        ``request_clarification`` pauses with ``interrupt()`` and LangGraph
+        re-runs that whole node on resume, so the model call lives here and
+        runs once per clarification round.
+        """
+
+        empty = {"clarification_question": "", "suggestions": [], "citations": []}
+        if state.get("query_understanding_unavailable") or state.get(
+            "evidence_unavailable"
+        ):
+            return empty
+        if state.get("out_of_scope"):
+            composed = self._converse(state, "out_of_scope", {})
+            if composed is None:
+                return empty
+            return {
+                "clarification_question": composed.reply,
+                "suggestions": composed.suggestions,
+                "citations": [],
+            }
+        if (
+            self._enable_interrupts
+            and state.get("clarification_attempts", 0) >= 3
+        ):
+            return empty
+        context = state.get("retrieved_context", {})
+        missing = self._clarification_details(
+            state, after_no_match=bool(context.get("no_close_match"))
+        )
+        facts: dict[str, Any] = {
+            "known_details": self._known_details(state),
+            "missing_details": missing,
+            "no_close_match": bool(context.get("no_close_match")),
+            "diagnostic_commands": DIAGNOSTIC_COMMANDS,
+        }
+        if context.get("cross_version_matches"):
+            facts["cross_version_note"] = (
+                "A similar symptom was reported in another Kubernetes version; "
+                "its resolution must not be assumed to apply."
+            )
+        documentation = self._clarification_documentation(state)
+        if documentation:
+            facts["documentation"] = documentation
+        composed = self._converse(state, "clarify", facts)
+        if composed is None:
+            return empty
+        return {
+            "clarification_question": composed.reply,
+            "suggestions": composed.suggestions,
+            "citations": composed.citations,
+        }
+
+    def _clarification_documentation(
+        self, state: IncidentState
+    ) -> list[dict[str, str]]:
+        """A few doc chunks so a clarification can also offer a starting point.
+
+        Only for reports that name a component or symptom; a bare "it's broken"
+        would retrieve arbitrary pages.
+        """
+
+        if self._documentation_retriever is None:
+            return []
+        if not (state.get("extracted_components") or state.get("extracted_symptom")):
+            return []
+        try:
+            chunks = self._documentation_retriever.search(
+                state["normalized_query"], limit=3
+            )
+        except Exception:
+            LOGGER.warning("Documentation lookup for clarification failed")
+            return []
+        return [
+            {
+                "title": chunk.get("title", ""),
+                "text": chunk.get("text", "")[:COMPOSE_TEXT_CHARS * 2],
+                "source_url": chunk["source_url"],
+            }
+            for chunk in chunks
+            if chunk.get("source_url")
+        ]
+
+    def _template_question(self, state: IncidentState, missing: list[str]) -> str:
+        """Deterministic clarification used when the composer is unavailable."""
+
         prefix = (
             "No close historical incident was found. Please provide: "
             if state.get("retrieved_context", {}).get("no_close_match")
@@ -752,49 +1056,7 @@ class IncidentNodes:
             + ", ".join(missing)
             + "."
         )
-        attempts = state.get("clarification_attempts", 0)
-        if self._enable_interrupts:
-            if attempts >= 3:
-                return {
-                    "answer": (
-                        "I could not collect enough diagnostic detail after three "
-                        "clarification attempts. Still needed: "
-                        + ", ".join(missing)
-                        + "."
-                    ),
-                    "citations": [],
-                    "route": "request_clarification",
-                    "route_reason": "maximum clarification attempts reached",
-                    "actionable_fix_available": False,
-                    "clarification_exhausted": True,
-                }
-            response = interrupt(
-                {
-                    "question": question,
-                    "known_details": self._known_details(state),
-                    "missing_details": missing,
-                }
-            )
-            return {
-                "clarification_history": [
-                    *state.get("clarification_history", []),
-                    str(response).strip(),
-                ],
-                "clarification_attempts": attempts + 1,
-                "clarification_exhausted": False,
-                "answer": "",
-                "citations": [],
-            }
-        return {
-            "answer": question,
-            "citations": [],
-            "route": "request_clarification",
-            "route_reason": state.get(
-                "route_reason",
-                "incident description lacks sufficient diagnostic detail",
-            ),
-            "actionable_fix_available": False,
-        }
+        return question
 
     @staticmethod
     def _known_details(state: IncidentState) -> dict[str, Any]:

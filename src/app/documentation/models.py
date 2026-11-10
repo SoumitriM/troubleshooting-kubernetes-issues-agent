@@ -1,5 +1,7 @@
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.agent.state import clean_suggestions
+
 
 class DocumentationPage(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -26,8 +28,14 @@ class GroundedDocumentationAnswer(BaseModel):
 
     answer: str = Field(min_length=1)
     citations: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
 
     @field_validator("citations")
     @classmethod
     def unique_citations(cls, citations: list[str]) -> list[str]:
         return list(dict.fromkeys(citations))
+
+    @field_validator("suggestions")
+    @classmethod
+    def validate_suggestions(cls, suggestions: list[str]) -> list[str]:
+        return clean_suggestions(suggestions)

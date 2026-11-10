@@ -22,6 +22,28 @@ Route = Literal[
     "request_clarification",
 ]
 
+MAX_SUGGESTIONS = 3
+MAX_SUGGESTION_CHARS = 100
+
+
+def clean_suggestions(suggestions: list[str]) -> list[str]:
+    """Trim, de-duplicate and cap follow-up suggestions shown as quick replies."""
+
+    cleaned: list[str] = []
+    for item in suggestions:
+        text = " ".join(item.split())
+        if not text:
+            continue
+        if len(text) > MAX_SUGGESTION_CHARS:
+            raise ValueError(
+                f"each suggestion must be at most {MAX_SUGGESTION_CHARS} characters"
+            )
+        if "http://" in text or "https://" in text:
+            raise ValueError("suggestions must not contain URLs")
+        if text.casefold() not in {existing.casefold() for existing in cleaned}:
+            cleaned.append(text)
+    return cleaned[:MAX_SUGGESTIONS]
+
 
 class NormalizedQuery(BaseModel):
     """Meaning-preserving query representation shared by all routes."""
@@ -147,6 +169,11 @@ class IncidentState(TypedDict, total=False):
     route_reason: str
     answer: str
     citations: list[str]
+    # Short follow-ups the UI offers as one-click replies.
+    suggestions: list[str]
+    # Conversational question prepared before the clarification interrupt, so
+    # the model call is not repeated when LangGraph re-runs the paused node.
+    clarification_question: str
 
 
 class IncidentMatchJudgement(BaseModel):
@@ -178,6 +205,12 @@ class ResearchStep(BaseModel):
     versions: list[str] = Field(default_factory=list)
     answer: str | None = None
     citations: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+
+    @field_validator("suggestions")
+    @classmethod
+    def validate_suggestions(cls, suggestions: list[str]) -> list[str]:
+        return clean_suggestions(suggestions)
 
 
 class GroundedFixAnswer(BaseModel):
@@ -197,3 +230,27 @@ class GroundedFixAnswer(BaseModel):
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ValueError("citations must be absolute HTTP URLs")
         return list(dict.fromkeys(citations))
+
+
+class ComposedReply(BaseModel):
+    """A conversational reply written around evidence a route already gathered.
+
+    The reply may rephrase supplied facts but never add new ones; the client
+    checks every number, code span, issue reference and URL against the payload.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reply: str = Field(min_length=1, max_length=2000)
+    citations: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+
+    @field_validator("citations")
+    @classmethod
+    def unique_citations(cls, citations: list[str]) -> list[str]:
+        return list(dict.fromkeys(citations))
+
+    @field_validator("suggestions")
+    @classmethod
+    def validate_suggestions(cls, suggestions: list[str]) -> list[str]:
+        return clean_suggestions(suggestions)

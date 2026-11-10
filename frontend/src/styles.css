@@ -75,6 +75,11 @@ button { cursor: pointer; }
 .message.error p { margin: 0; }
 .intent-pill { display: inline-block; margin-bottom: 6px; color: var(--accent); text-transform: uppercase; font-size: 10px; letter-spacing: 1.1px; font-weight: 700; }
 .message.clarify .intent-pill { color: var(--amber); }
+.suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.suggestions button { max-width: 100%; padding: 7px 12px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--text); background: var(--accent-soft); font-size: 13px; line-height: 1.35; text-align: left; overflow-wrap: anywhere; cursor: pointer; transition: border-color .15s, background .15s; }
+.suggestions button:hover, .suggestions button:focus-visible { border-color: var(--accent); background: rgba(78, 209, 188, .18); outline: none; }
+.message.clarify .suggestions button { border-color: rgba(229, 185, 104, .32); background: rgba(229, 185, 104, .08); }
+.message.clarify .suggestions button:hover, .message.clarify .suggestions button:focus-visible { border-color: var(--amber); }
 .formatted { color: #c3d4d1; font-size: 15px; line-height: 1.68; overflow-wrap: anywhere; }
 .formatted p { margin: 0 0 10px; }
 .formatted ul, .formatted ol { margin: 0 0 10px; padding-left: 22px; }

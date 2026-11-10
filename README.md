@@ -344,7 +344,7 @@ An underspecified report pauses with a safe public response:
 {
   "thread_id": "demo-thread-1",
   "status": "needs_clarification",
-  "question": "Please provide: specific observed behaviour, exact error message or error code, Kubernetes version, relevant logs.",
+  "question": "That's frustrating, so let's narrow it down. What are you seeing, and is there an error message? `kubectl get pods -A` usually shows where things are going wrong.",
   "known_details": {},
   "missing_details": [
     "specific observed behaviour",
@@ -352,9 +352,15 @@ An underspecified report pauses with a safe public response:
     "affected component",
     "Kubernetes version",
     "relevant logs"
-  ]
+  ],
+  "citations": [],
+  "suggestions": ["Pods are stuck in Pending", "It's CrashLoopBackOff", "Nodes show NotReady"]
 }
 ```
+
+The question is written by Claude from the missing details and may point to a
+read-only diagnostic command. If that call fails, it falls back to listing the
+missing details.
 
 Resume the same checkpoint with the user's additional evidence:
 
