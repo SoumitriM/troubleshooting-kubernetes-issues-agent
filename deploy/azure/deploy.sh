@@ -44,10 +44,18 @@ az provider register --namespace Microsoft.OperationalInsights --wait
 echo "Resource group $RESOURCE_GROUP in $LOCATION"
 az group create -n "$RESOURCE_GROUP" -l "$LOCATION" --output none
 
-if ! az containerapp env show -n "$ENVIRONMENT" -g "$RESOURCE_GROUP" --output none 2>/dev/null; then
-  echo "Container Apps environment $ENVIRONMENT (no Log Analytics, to avoid log charges)"
+MODE="$(az containerapp env show -n "$ENVIRONMENT" -g "$RESOURCE_GROUP" --query properties.environmentMode -o tsv 2>/dev/null || true)"
+if [ -z "$MODE" ]; then
+  # ConsumptionOnly, not the CLI's default Express mode: in Express environments
+  # "internal" ingress is still reachable from the internet and plain HTTP
+  # between apps is not supported.
+  echo "Container Apps environment $ENVIRONMENT (ConsumptionOnly, no Log Analytics)"
   az containerapp env create -n "$ENVIRONMENT" -g "$RESOURCE_GROUP" -l "$LOCATION" \
-    --logs-destination none --output none
+    --environment-mode ConsumptionOnly --logs-destination none --output none
+elif [ "$MODE" = "Express" ]; then
+  echo "$ENVIRONMENT is an Express environment, where internal ingress is public." >&2
+  echo "Delete it (az containerapp env delete -n $ENVIRONMENT -g $RESOURCE_GROUP) and re-run." >&2
+  exit 1
 fi
 
 API_ENV=(

@@ -65,3 +65,17 @@ def test_frontend_is_exposed_and_proxies_to_the_internal_api() -> None:
     assert "09-frontend-deployment.yaml" in kustomization
     assert "proxy_pass http://incident-resolution-ai:8000" in nginx
     assert "location = /ready" in nginx
+
+
+def test_frontend_image_renders_nginx_config_into_a_separate_file() -> None:
+    """The build swaps the API upstream with sed. Redirecting the output onto the
+    file sed is reading empties it, and nginx then starts with no config."""
+
+    dockerfile = (ROOT / "frontend" / "Dockerfile").read_text(encoding="utf-8")
+    nginx = (ROOT / "frontend" / "nginx.conf").read_text(encoding="utf-8")
+
+    assert "> /tmp/nginx.conf" in dockerfile
+    assert "COPY --from=builder /tmp/nginx.conf /etc/nginx/nginx.conf" in dockerfile
+    assert "nginx.conf > /build/nginx.conf" not in dockerfile
+    # The default upstream the sed expression replaces must exist in the config.
+    assert "http://incident-resolution-ai:8000" in nginx
