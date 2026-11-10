@@ -185,7 +185,14 @@ asks Claude for a conversational question: it acknowledges what is already
 known, asks for the one or two missing details that would help most, may
 point to a relevant documentation page or a read-only diagnostic command, and
 offers likely answers as suggestions. If that call fails, the question falls
-back to a list of the missing details. The client resumes with the
+back to a list of the missing details.
+
+While a question is pending, the next chat message is treated as its answer.
+`understand_query` judges that answer on its own
+(`clarification_answer_relevant`): an off-topic message, a request to change
+data or run commands, or an attempt to change the assistant's instructions is
+removed from the incident facts and declined with a scope reply that offers to
+continue the pending problem. It does not count as a clarification attempt. The client resumes with the
 user's answer, and the workflow re-runs `understand_query` on the original
 question plus every answer. After three clarification rounds the thread ends
 and lists what is still missing.

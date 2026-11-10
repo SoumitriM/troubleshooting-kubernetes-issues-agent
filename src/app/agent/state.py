@@ -86,6 +86,9 @@ class QueryUnderstanding(BaseModel):
     # False for non-Kubernetes questions and for requests to change data or
     # run commands; such queries get a scope answer instead of clarification.
     in_scope: bool = True
+    # False when the latest "Clarification N:" answer does not answer the
+    # pending question: off-topic, destructive, or instructions to the assistant.
+    clarification_answer_relevant: bool = True
     # Evidence sources the question needs; two or more route to research.
     sources: list[EvidenceSource] = Field(default_factory=list)
     # Analytics conditions the component/version templates cannot express
@@ -178,6 +181,9 @@ class IncidentState(TypedDict, total=False):
     # No reported issue matched and the docs could not answer either, so the
     # turn falls back to a clarifying question.
     docs_troubleshooting_failed: bool
+    # A clarification answer rejected as off-topic or unsafe; it is removed
+    # from clarification_history and declined instead of merged.
+    rejected_message: str
 
 
 class IncidentMatchJudgement(BaseModel):

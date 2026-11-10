@@ -107,6 +107,7 @@ class IncidentNodes:
                 for index, answer in enumerate(history, 1)
             ]
         )
+        clarifications = list(state.get("clarification_history", []))
         understanding_unavailable = False
         try:
             history = state.get("conversation_history") or []
@@ -128,6 +129,16 @@ class IncidentNodes:
                 intent="NEEDS_CLARIFICATION",
                 intent_confidence=0.0,
                 reasoning="Query understanding service is temporarily unavailable",
+            )
+        rejected = ""
+        if clarifications and not analysis.clarification_answer_relevant:
+            # The pending question was answered with something off-topic,
+            # destructive or manipulative. Decline it and keep it out of the
+            # incident facts instead of counting it as a clarification.
+            LOGGER.info("Clarification answer rejected as off-topic or unsafe")
+            rejected = clarifications.pop()
+            analysis = analysis.model_copy(
+                update={"in_scope": False, "intent": "NEEDS_CLARIFICATION"}
             )
         LOGGER.info(
             "Query routed intent=%s confidence=%.2f",
@@ -168,6 +179,8 @@ class IncidentNodes:
             "suggestions": [],
             "clarification_question": "",
             "docs_troubleshooting_failed": False,
+            "clarification_history": clarifications,
+            "rejected_message": rejected,
         }
 
     def _converse(
@@ -1101,9 +1114,10 @@ class IncidentNodes:
         ):
             return empty
         if state.get("out_of_scope"):
-            composed = self._converse(
-                state, "out_of_scope", {"example_questions": EXAMPLE_QUESTIONS}
-            )
+            facts: dict[str, Any] = {"example_questions": EXAMPLE_QUESTIONS}
+            if state.get("rejected_message"):
+                facts["pending_incident"] = state.get("original_query")
+            composed = self._converse(state, "out_of_scope", facts)
             if composed is None:
                 return empty
             return {
