@@ -1,0 +1,53 @@
+name: Keep AuraDB awake
+
+# Neo4j AuraDB Free pauses an instance after a few days without queries, which
+# takes graph analytics and incident search offline. One small read a day
+# keeps it active. Needs repository secrets NEO4J_URI_AURA,
+# NEO4J_USERNAME_AURA and NEO4J_PASSWORD_AURA.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run a read query
+        env:
+          NEO4J_URI: ${{ secrets.NEO4J_URI_AURA }}
+          NEO4J_USERNAME: ${{ secrets.NEO4J_USERNAME_AURA }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD_AURA }}
+        run: |
+          python -m pip install --quiet "neo4j>=5,<6"
+          python - <<'EOF'
+          import os
+          import sys
+
+          from neo4j import GraphDatabase
+
+          missing = [k for k in ("NEO4J_URI", "NEO4J_USERNAME", "NEO4J_PASSWORD") if not os.environ.get(k)]
+          if missing:
+              sys.exit(f"Missing repository secrets for: {', '.join(missing)}")
+
+          with GraphDatabase.driver(
+              os.environ["NEO4J_URI"],
+              auth=(os.environ["NEO4J_USERNAME"], os.environ["NEO4J_PASSWORD"]),
+          ) as driver:
+              try:
+                  records, _, _ = driver.execute_query("MATCH (n) RETURN count(n) AS nodes")
+              except Exception as error:
+                  sys.exit(
+                      f"AuraDB did not answer ({type(error).__name__}). If the instance is "
+                      "paused, resume it at https://console.neo4j.io"
+                  )
+          print(f"AuraDB is awake: {records[0]['nodes']} nodes")
+          EOF
